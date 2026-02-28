@@ -14,14 +14,14 @@
 - 引入 `config/preflop_ranges.yaml`：基于当前座位（EP, MP, LP, SB）定义不同宽严程度的翻牌前入局范围。
 - `GameState` 增加 VPIP (入池率) 和 PFR (翻前加注率) 字段，为后续对手剥削策略铺路。
 
-### 🛡️ 防封禁与资金管理
-- 在 `src/core/utils.py` 引入高斯分布的随机延迟函数，模拟真人思考点击节奏。
-- 生成明确的百万路程规划 (`1m_chip_strategy.md`) 和 `run_bot.md` 工作流。
+### 🏆 盈利目标与自动离场 (The 1M Goal)
+- **筹码跟踪**: 实时抓取并记录初始筹码量与当前余额，自动计算盈利状况。
+- **自动离场**: 实现 `leave_table` 逻辑。当 Session 累计盈利达到 1,000,000 筹码时，Bot 将自动安全离开牌桌。
+- **UI 对接**: 支持从“Call”按钮文本中实时解析最新的 `to_call` 数额，极大提升了赔率计算的准确性。
 
-### 🧠 策略引擎与 GTO 进化
-- **EV 决策模型**: 结合 `Monte Carlo` 胜率与 `Pot Odds` (底池赔率) 进行数学期望分析，支持更合理的 +EV Call/Fold 选择。
-- **下注尺度 (Bet Sizing)**: 细化加注逻辑，区分 1/2 POT, 2/3 POT 和 POT 等不同力度。
-- **对手画像 (Profiling)**: 实现基于 VPIP 和 PFR 的自动打标签功能（如 NIT, MANIAC, CALLING STATION），并实时显示在分析面板中。
+### 🧪 稳定性与测试
+- **回归测试**: 新增 `tests/test_decision_regression.py`。涵盖了不同对手风格（NIT, MANIAC）下的决策一致性校验。
+- **代码除错**: 修复了 `analyze_all_players` 中的变量定义错误，确保全模式运行无中断。
 
 ### 🔄 Ralph Loop 自动化增强
 - **大厅自动化**: 实现 `navigate_to_lobby` 和 `apply_lobby_filters`，支持自动寻找 Texas Hold'em 常规桌。
