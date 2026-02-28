@@ -33,6 +33,8 @@ class GameState:
     pot: int = 0
     current_dealer_seat: Optional[int] = None
     my_seat_id: Optional[int] = None
+    active_seat: Optional[int] = None
+    to_call: int = 0
     players: Dict[int, Player] = field(default_factory=dict)
     my_initial_chips: int = 0
     total_chips: int = 0 # Current account balance (on-table + bank)
@@ -49,6 +51,8 @@ class GameState:
         self.hole_cards = []
         self.community_cards = []
         self.pot = 0
+        self.to_call = 0
+        self.active_seat = None
         for p in self.players.values():
             p.is_active = True # Assume active at start of hand
             p.is_acting = False

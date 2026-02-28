@@ -21,6 +21,8 @@ class ReplayPokerClient:
         self.is_sitting = False
         self.current_balance = 0
         self.session_profit = 0
+        self.initial_chips = None
+        self.profit_goal = 1000000
         self.lobby_url = "https://www.replaypoker.com/lobby"
         self.target_stakes = "1/2" # Default target
 
@@ -144,6 +146,13 @@ class ReplayPokerClient:
                      
                      # Wait a bit to avoid double clicking before UI updates
                      await asyncio.sleep(5)
+                     
+                # 5. Check Goal Reached
+                if self.initial_chips is not None:
+                     current_profit = self.current_balance - self.initial_chips
+                     if current_profit >= self.profit_goal:
+                          print(f"[GOAL] Profit target reached! ({current_profit}). Leaving table.", flush=True)
+                          await self.leave_table()
         elif self.page.url == "https://www.replaypoker.com/" or self.page.url == "https://www.replaypoker.com/home":
              # At home page, go to lobby
              await self.navigate_to_lobby()
@@ -667,10 +676,22 @@ class ReplayPokerClient:
                      if cleaned:
                          self.current_balance = int(cleaned)
                          self.state.total_chips = self.current_balance
+                         
+                         if self.initial_chips is None and self.current_balance > 0:
+                              self.initial_chips = self.current_balance
+                              print(f"[SYSTEM] Initial balance set: {self.initial_chips}", flush=True)
 
-            # 3. Check for specific action buttons (My Turn)
-            # ReplayPoker buttons are usually in .game-controls or similar
-            buttons = await self.find_action_buttons()
+            # 3. Parse Call Amount from Button
+            call_btn = buttons.get("call")
+            if call_btn:
+                 btn_text = await call_btn.text_content()
+                 if btn_text:
+                      cleaned = re.sub(r"[^\d]", "", btn_text)
+                      if cleaned:
+                           self.state.to_call = int(cleaned)
+                           # print(f"[TABLE] to_call updated from UI: {self.state.to_call}", flush=True)
+
+            # 4. Check for specific action buttons (My Turn)
             if buttons:
                  # If we see buttons AND a specific timeout bar, it's definitely our turn?
                  # For now, finding some specific buttons is enough
@@ -712,6 +733,18 @@ class ReplayPokerClient:
              await self.navigate_to_lobby()
         except Exception as e:
              print(f"[SYSTEM] Reconnect failed: {e}", flush=True)
+
+    async def leave_table(self):
+        """Clicks 'Leave' or 'Stand up' to exit table."""
+        print("[TABLE] Leaving table...", flush=True)
+        try:
+             # ReplayPoker leave button is often in a menu or top left
+             leave_btn = self.page.get_by_text("Leave", exact=False).first
+             if await leave_btn.count() > 0:
+                  await leave_btn.click()
+                  self.is_sitting = False
+        except Exception as e:
+             print(f"[TABLE] Failed to leave: {e}", flush=True)
 
     async def close(self):
         if self.context:

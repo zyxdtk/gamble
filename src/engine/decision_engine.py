@@ -78,7 +78,7 @@ class DecisionEngine:
             equity_match = re.search(r'(\d+\.?\d*)%', equity_info)
             my_equity = float(equity_match.group(1)) / 100.0 if equity_match else 0
             
-            my_action = self.evaluate_postflop_v2(state.hole_cards, state.community_cards, my_equity, pot_odds)
+            my_action = self.evaluate_postflop_v2(state.hole_cards, state.community_cards, my_equity, pot_odds, state)
             my_hand_strength = my_action.split(":")[1].split("-")[0].strip() if ":" in my_action else ""
         
         # Analyze all players
@@ -99,10 +99,11 @@ class DecisionEngine:
 
     def get_call_amount(self, state: GameState) -> int:
         """Estimates the amount needed to call."""
-        # This is hard to get exactly from WS without 'toCall' field.
-        # But we can try to guess it by looking at other players' current street bets.
-        # Or just use the action buttons later in poker_client.
-        return 0 # Placeholder: will be determined by UI buttons in client for now
+        if state.to_call > 0:
+             return state.to_call
+             
+        # Placeholder: will be determined by UI buttons in client for now
+        return 0
 
     def get_preflop_equity(self, hole_cards) -> float:
         # Very rough estimation of preflop equity vs 1 opponent
@@ -145,22 +146,46 @@ class DecisionEngine:
         
         return {"action": "CHECK", "amount": 0}
 
-    def evaluate_postflop_v2(self, hole_cards, community_cards, equity, pot_odds):
+    def evaluate_postflop_v2(self, hole_cards, community_cards, equity, pot_odds, state: GameState):
         hand_desc = self.evaluate_postflop(hole_cards, community_cards)
         street = hand_desc.split(":")[0]
         hand_strength = hand_desc.split(":")[1].split("-")[0].strip()
         
-        # EV analysis
-        if equity > pot_odds + 0.2: # Very strong edge
+        # 1. Broadly analyze active opponents
+        opponents = [p for p in state.players.values() if p.is_active and p.status != "folded"]
+        is_against_nit = any(self.get_player_tag(p) == "紧逼 (Nit/Tight)" for p in opponents)
+        is_against_maniac = any(self.get_player_tag(p) == "疯子 (Maniac)" for p in opponents)
+        is_against_station = any(self.get_player_tag(p) == "跟注站 (Calling Station)" for p in opponents)
+
+        # 2. Adjust thresholds based on opponent profile (Exploitation)
+        call_threshold = pot_odds
+        raise_threshold = pot_odds + 0.1
+        
+        if is_against_nit:
+            # Nit raises are very strong, require more equity to call/raise
+            call_threshold += 0.1
+            raise_threshold += 0.15
+            # print("[EXPLOIT] Tightening against Nit", flush=True)
+        elif is_against_maniac:
+            # Maniacs bet wide, can call with less equity
+            call_threshold -= 0.05
+            # print("[EXPLOIT] Loosening against Maniac", flush=True)
+
+        # 3. EV analysis
+        if equity > raise_threshold + 0.1: # Very strong edge
              action = "加注 (2/3 POT)"
-        elif equity > pot_odds + 0.1: # Moderate edge
+        elif equity > raise_threshold: # Moderate edge
              action = "加注 (1/2 POT)"
-        elif equity > pot_odds:
+        elif equity > call_threshold:
              action = "跟注"
         else:
              action = "过牌/弃牌"
              
-        # Override with monster hands
+        # 4. Special Rule: Don't bluff Calling Stations
+        if is_against_station and equity < 0.4 and hand_strength == "高牌":
+             action = "过牌/弃牌" # Don't try to push them off anything
+
+        # 5. Override with monster hands
         if hand_strength in ["四条", "葫芦", "三条", "同花", "顺子"]:
              action = "加注 (POT)"
              
@@ -401,6 +426,8 @@ class DecisionEngine:
             
             # Estimate equity
             equity = self.estimate_player_equity(player, state)
+            
+            visible_cards = []
             
             player_info = {
                 "seat_id": seat_id,
