@@ -75,7 +75,7 @@ class GameUI:
             community_cards = state.community_cards
             
             # Simple Logging
-            current_log = f"Hole: {hole_cards} | Board: {community_cards}"
+            current_log = f"Hole: {hole_cards} | Board: {community_cards} | Balance: {self.client.current_balance}"
             
             if hole_cards or community_cards:
                  # Evaluate
@@ -87,25 +87,8 @@ class GameUI:
                 print(current_log)
                 last_log = current_log
             
-            # If in auto mode, the logic inside poker_client's WS handler or a poll can trigger execute_decision.
-            # For now, let's keep the client-side decision check if needed.
-            if self.client.auto_mode_enabled:
-                # The poker_client.py:main() had a check logic. 
-                # Let's see if we should move that here or let poker_client handle it.
-                # ReplayPokerClient.process_replay_poker_message already triggers HUD updates and handles auto logic?
-                # Actually in current poker_client.py, it was in the main() loop.
-                # Let's check for buttons here too if we want.
-                buttons = await self.client.find_action_buttons()
-                if buttons:
-                     print("[AUTO] It's our turn! (Buttons visible)", flush=True)
-                     suggestion = self.client.engine.decide(self.client.state)
-                     print(f"[AUTO] Suggestion: {suggestion}", flush=True)
-                     
-                     await self.client.update_hud(suggestion)
-                     await self.client.execute_decision(suggestion)
-                     
-                     # Wait a bit
-                     await asyncio.sleep(5)
+            # Handle automation pulse (Lobby, Sitting, Buying, Playing)
+            await self.client.run_automation_tick()
                 
             await asyncio.sleep(1)
 

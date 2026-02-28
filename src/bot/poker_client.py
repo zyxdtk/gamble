@@ -21,6 +21,8 @@ class ReplayPokerClient:
         self.is_sitting = False
         self.current_balance = 0
         self.session_profit = 0
+        self.lobby_url = "https://www.replaypoker.com/lobby"
+        self.target_stakes = "1/2" # Default target
 
     async def find_action_buttons(self):
         """Finds available action buttons on the page."""
@@ -101,7 +103,132 @@ class ReplayPokerClient:
         
         print("[AUTO] Could not execute any suggested actions.", flush=True)
         
-    # (Existing methods...)
+    async def run_automation_tick(self):
+        """Unified tick for automated actions (lobby, sitting, playing)."""
+        if not self.page: return
+        
+        # 1. Periodically update state from DOM
+        await self.update_state_from_dom()
+        
+        # 2. Only run automation if enabled
+        if not self.auto_mode_enabled: return
+        
+        url = self.page.url
+        if "/lobby" in url:
+            await self.navigate_to_lobby()
+        elif "/table/" in url:
+            if not self.is_sitting:
+                await self.sit_and_buyin()
+            else:
+                # 1. Check for "I'm back" overlay or button
+                im_back = self.page.get_by_text("I'm back", exact=False).first
+                if await im_back.count() > 0 and await im_back.is_visible():
+                    print("[TABLE] 'I'm back' button detected. Clicking...", flush=True)
+                    await im_back.click()
+                    await asyncio.sleep(1)
+
+                # 2. Check for our turn
+                buttons = await self.find_action_buttons()
+                if buttons:
+                     print("[AUTO] It's our turn! (Buttons visible)", flush=True)
+                     decision_data = self.engine.decide(self.state)
+                     suggestion = decision_data.get("my_action", "") if isinstance(decision_data, dict) else decision_data
+                     print(f"[AUTO] Suggestion: {suggestion}", flush=True)
+                     
+                     await self.update_hud(decision_data)
+                     await self.execute_decision(suggestion)
+                     
+                     # Wait a bit to avoid double clicking before UI updates
+                     await asyncio.sleep(5)
+        elif self.page.url == "https://www.replaypoker.com/" or self.page.url == "https://www.replaypoker.com/home":
+             # At home page, go to lobby
+             await self.navigate_to_lobby()
+
+    async def navigate_to_lobby(self):
+        """Navigates to the ring games lobby."""
+        if not self.page: return
+        
+        print("[LOBBY] Navigating to lobby...", flush=True)
+        try:
+            # ReplayPoker lobby link or direct URL
+            await self.page.goto(self.lobby_url)
+            await self.page.wait_for_load_state("networkidle")
+            
+            # Click "Ring Games" if not already there
+            ring_games_tab = self.page.get_by_role("link", name="Ring Games")
+            if await ring_games_tab.count() > 0:
+                await ring_games_tab.click()
+                await asyncio.sleep(2)
+                
+            await self.apply_lobby_filters()
+            await self.join_best_table()
+        except Exception as e:
+            print(f"[LOBBY] Navigation failed: {e}", flush=True)
+
+    async def apply_lobby_filters(self):
+        """Applies filters for Hold'em, 9-max, etc."""
+        print("[LOBBY] Applying filters...", flush=True)
+        try:
+            # Hold'em filter
+            holdem_filter = self.page.get_by_text("Texas Hold'em", exact=False).first
+            if await holdem_filter.count() > 0:
+                await holdem_filter.click()
+                
+            # Stake levels can be tricky, usually they are tabs or checkboxes
+            # For now, let's assume we want "Low" or "Medium" stakes
+            low_stake = self.page.get_by_text("Low", exact=True)
+            if await low_stake.count() > 0:
+                await low_stake.click()
+            
+            await asyncio.sleep(2)
+        except Exception as e:
+            print(f"[LOBBY] Filter application error: {e}", flush=True)
+
+    async def join_best_table(self):
+        """Finds a table with empty seats and joins."""
+        print("[LOBBY] Searching for a table...", flush=True)
+        try:
+            # Look for "Play" buttons in the table list
+            # ReplayPoker uses 'Play' or 'Join' or just clicking the row
+            play_buttons = self.page.get_by_role("button", name="Play")
+            if await play_buttons.count() > 0:
+                # Click the first one that has a reasonable number of players (not full, not empty)
+                # For simplicity, just pick the first available
+                print("[LOBBY] Found a table! Joining...", flush=True)
+                await play_buttons.first.click()
+                return True
+            
+            # Alternative: clicking row? 
+            # (Requires more specific selectors based on actual site structure)
+        except Exception as e:
+            print(f"[LOBBY] Failed to join table: {e}", flush=True)
+        return False
+
+    async def sit_and_buyin(self):
+        """Clicks an empty seat and handles the buy-in popup."""
+        if not self.page or "/table/" not in self.page.url:
+            return
+            
+        try:
+            # 1. Find an empty seat
+            # ReplayPoker empty seats often have 'Sit here' or '+' icon
+            sit_here = self.page.get_by_text("Sit here", exact=False).first
+            if await sit_here.count() > 0 and await sit_here.is_visible():
+                print("[TABLE] Found empty seat. Sitting...", flush=True)
+                await sit_here.click()
+                await asyncio.sleep(2)
+                
+                # 2. Handle Buy-in dialog
+                # Usually has 'Bring Chips', 'Buy In', 'Confirm'
+                buyin_button = self.page.get_by_role("button", name=re.compile("Buy In|Bring Chips|Confirm", re.I)).first
+                if await buyin_button.count() > 0:
+                    print("[TABLE] Confirming Buy-in...", flush=True)
+                    await buyin_button.click()
+                    self.is_sitting = True
+                    return True
+        except Exception as e:
+            print(f"[TABLE] Sit/Buy-in failed: {e}", flush=True)
+        return False
     async def inject_hud(self):
         """Injects the HUD HTML/CSS into the page."""
         if self.page:
@@ -216,8 +343,15 @@ class ReplayPokerClient:
             else:
                 self.page = await self.context.new_page()
 
-            print("Navigating to https://www.casino.org/replaypoker...", flush=True)
-            await self.page.goto("https://www.casino.org/replaypoker")
+            print("Navigating to https://www.replaypoker.com/...", flush=True)
+            await self.page.goto("https://www.replaypoker.com/")
+            
+            # Check if login is needed
+            if "login" in self.page.url:
+                 print("[LOBBY] Login required. Please login manually in the browser.", flush=True)
+            else:
+                 # Attempt to go to lobby
+                 await self.navigate_to_lobby()
 
         print("Browser launched. Attaching listeners...", flush=True)
         # Attach to all pages initially, but handlers will filter by URL
@@ -575,28 +709,8 @@ async def main():
                 print("[STOP] Browser page closed. Exiting auto-player.", flush=True)
                 break
 
-            # Periodically check DOM state (and inject HUD if needed)
-            await client.update_state_from_dom()
-
-            # Check if we need to act (Auto Mode)
-            if client.auto_mode_enabled:
-                # Alternate strategy: Look for buttons. If "Fold" is visible, it's likely our turn.
-                buttons = await client.find_action_buttons()
-                if buttons:
-                     print("[AUTO] It's our turn! (Buttons visible)", flush=True)
-                     suggestion = client.engine.decide(client.state)
-                     print(f"[AUTO] Suggestion: {suggestion}", flush=True)
-                     
-                     await client.update_hud(suggestion)
-                     await client.execute_decision(suggestion)
-                     
-                     # Wait a bit to avoid double clicking before UI updates
-                     await asyncio.sleep(5)
-            else:
-                # In Assist Mode, we still want to update HUD when it's our turn or just periodically?
-                # The process_replay_poker_message handles HUD updates on game events.
-                # But if we want to ensure it updates when buttons appear (passive check):
-                pass
+            # Let the client handle everything in one pulse
+            await client.run_automation_tick()
             
             # await client.dump_html() # Debug if needed
     except KeyboardInterrupt:

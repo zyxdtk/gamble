@@ -18,6 +18,12 @@
 - 在 `src/core/utils.py` 引入高斯分布的随机延迟函数，模拟真人思考点击节奏。
 - 生成明确的百万路程规划 (`1m_chip_strategy.md`) 和 `run_bot.md` 工作流。
 
+### 🔄 Ralph Loop 自动化增强
+- **大厅自动化**: 实现 `navigate_to_lobby` 和 `apply_lobby_filters`，支持自动寻找 Texas Hold'em 常规桌。
+- **自动入座**: 实现 `sit_and_buyin` 逻辑，自动寻找空位并处理买入弹窗。
+- **状态自愈**: 增加 “I'm Back” 按钮检测，防止因超时被踢出。
+- **统一 Pulse**: 建立 `run_automation_tick` 机制，整合大厅、坐下、打牌的闭环逻辑。
+
 ## 2026-02-08 更新
 
 ### ✅ HUD 重构与修复
