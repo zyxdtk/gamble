@@ -1,0 +1,20 @@
+bot:
+  name: "RalphBot"
+  headless: false
+  session_timeout_min: 300
+  target_profit: 1000000
+
+strategy:
+  style: "TAG"  # Tight-Aggressive
+  anti_ban:
+    min_action_delay: 2.0
+    max_action_delay: 4.5
+    jitter_amount: 0.05
+  bankroll_management:
+    min_buy_ins: 20
+    stop_loss_bb: 500  # Exit session if lost 5 buy-ins
+
+game:
+  preferred_stakes: "1/2"
+  game_type: "Texas Hold'em"
+  mode: "Ring Games"

@@ -1,0 +1,12 @@
+ranges:
+  # Early Position (UTG, UTG+1) - Top 10%
+  EP: ["AA", "KK", "QQ", "JJ", "TT", "99", "88", "AKs", "AQs", "AJs", "KQs", "AKo", "AQo"]
+  
+  # Middle Position (HJ, CO) - Top 15%
+  MP: ["AA", "KK", "QQ", "JJ", "TT", "99", "88", "77", "AKs", "AQs", "AJs", "ATs", "KQs", "KJs", "QJs", "AKo", "AQo", "AJo"]
+  
+  # Late Position (BTN, CO-ish) - Top 25%
+  LP: ["AA", "KK", "QQ", "JJ", "TT", "99", "88", "77", "66", "55", "AKs", "AQs", "AJs", "ATs", "A9s", "KQs", "KJs", "KTs", "QJs", "QTs", "JTs", "AKo", "AQo", "AJo", "ATo", "KQo", "KJo"]
+  
+  # Small Blind defense/opening - Top 30%
+  SB: ["AA", "KK", "QQ", "JJ", "TT", "99", "88", "77", "66", "55", "AKs", "AQs", "AJs", "ATs", "A9s", "A8s", "A7s", "KQs", "KJs", "KTs", "QJs", "QTs", "JTs", "J9s", "T9s", "AKo", "AQo", "AJo", "ATo", "KQo", "KJo", "QJo"]
