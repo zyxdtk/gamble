@@ -6,8 +6,8 @@ from rich.layout import Layout
 from rich.live import Live
 from rich.text import Text
 
-from .bot.poker_client import ReplayPokerClient
-from .engine.brain import PokerBrain
+from src.bot.poker_client import ReplayPokerClient
+from src.engine.brain import PokerBrain
 
 console = Console()
 
