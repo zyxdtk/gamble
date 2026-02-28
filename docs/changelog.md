@@ -1,5 +1,23 @@
 # 德州扑克 AI 助手 - 更新日志
 
+## 2026-02-28 更新
+
+### 🏗️ 核心架构重构 (The 1M Project Refactoring)
+- **目录重组**: 将所有源码从平铺的 `src/` 分散重构至四个核心子目录：
+  - `src/bot/`: 存放浏览器自动化脚本 (`poker_client.py`, `explore_lobby.py`)
+  - `src/engine/`: 存放决策相关逻辑 (`decision_engine.py`, `brain.py`)
+  - `src/core/`: 存放公共状态和工具类 (`game_state.py`, `utils.py`)
+  - `src/ui/`: 存放 HUD 显示相关 (`hud.py`)
+- **入口统一**: 修改 `src/main.py` 以天然支持 `--auto` 参数自动跑牌和 `--assist` 辅助模式。
+
+### 🧠 策略引擎升级 (Positional GTO)
+- 引入 `config/preflop_ranges.yaml`：基于当前座位（EP, MP, LP, SB）定义不同宽严程度的翻牌前入局范围。
+- `GameState` 增加 VPIP (入池率) 和 PFR (翻前加注率) 字段，为后续对手剥削策略铺路。
+
+### 🛡️ 防封禁与资金管理
+- 在 `src/core/utils.py` 引入高斯分布的随机延迟函数，模拟真人思考点击节奏。
+- 生成明确的百万路程规划 (`1m_chip_strategy.md`) 和 `run_bot.md` 工作流。
+
 ## 2026-02-08 更新
 
 ### ✅ HUD 重构与修复
