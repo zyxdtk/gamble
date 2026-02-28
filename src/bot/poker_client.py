@@ -127,7 +127,11 @@ class ReplayPokerClient:
                     await im_back.click()
                     await asyncio.sleep(1)
 
-                # 2. Check for our turn
+                # 3. Check for low chips -> Rebuy
+                if self.is_sitting and self.state.total_chips < 100: # Threshold
+                    await self.handle_rebuy()
+
+                # 4. Check for our turn
                 buttons = await self.find_action_buttons()
                 if buttons:
                      print("[AUTO] It's our turn! (Buttons visible)", flush=True)
@@ -683,6 +687,31 @@ class ReplayPokerClient:
         """
         await self.update_state_from_dom()
         return self.state
+
+    async def handle_rebuy(self):
+        """Finds and clicks rebuy buttons if visible."""
+        print("[TABLE] Attempting Rebuy...", flush=True)
+        try:
+            rebuy_btn = self.page.get_by_role("button", name=re.compile("Rebuy|Add Chips", re.I)).first
+            if await rebuy_btn.count() > 0:
+                await rebuy_btn.click()
+                await asyncio.sleep(2)
+                confirm = self.page.get_by_role("button", name=re.compile("Confirm|Bring", re.I)).first
+                if await confirm.count() > 0:
+                    await confirm.click()
+        except Exception as e:
+            print(f"[TABLE] Rebuy failed: {e}", flush=True)
+
+    async def handle_reconnect(self):
+        """Refreshes the page if connection lost."""
+        print("[SYSTEM] Attempting Reconnect...", flush=True)
+        try:
+             await self.page.reload()
+             await self.page.wait_for_load_state("networkidle")
+             await asyncio.sleep(5)
+             await self.navigate_to_lobby()
+        except Exception as e:
+             print(f"[SYSTEM] Reconnect failed: {e}", flush=True)
 
     async def close(self):
         if self.context:

@@ -54,36 +54,118 @@ class DecisionEngine:
             }
 
         # Determine Position (simplified)
-        # ReplayPoker counts seats 1-9. Button seat is state.current_dealer_seat.
-        # We assume our seat is state.my_seat_id.
         pos_code = self.get_position_code(state)
+        
+        # Calculate Pot Odds
+        # We need to know the amount to call. This depends on the last bet.
+        # Simplification: Assume call amount is roughly 1bb or based on state.pot updates.
+        # But we can try to guess call_amount from game_state players' stack changes?
+        # For now, let's look for the highest bet on the current street.
+        call_amount = self.get_call_amount(state)
+        pot_odds = call_amount / (state.pot + call_amount) if (state.pot + call_amount) > 0 else 0
         
         # Pre-flop
         if not state.community_cards:
             my_action = self.evaluate_preflop_v2(state.hole_cards, pos_code)
-            my_equity = 0  # Preflop equity is complex, use range vs range later
+            my_equity = self.get_preflop_equity(state.hole_cards) # Simplified
             my_hand_strength = "翻牌前"
         else:
             # Post-flop
-            my_action = self.evaluate_postflop(state.hole_cards, state.community_cards)
             equity_info = self.calculate_equity(state)
-            my_hand_strength = my_action.split(":")[1].split("-")[0].strip() if ":" in my_action else ""
             
-            # Extract equity percentage from equity_info
+            # Extract equity percentage
             import re
             equity_match = re.search(r'(\d+\.?\d*)%', equity_info)
-            my_equity = float(equity_match.group(1)) if equity_match else 0
+            my_equity = float(equity_match.group(1)) / 100.0 if equity_match else 0
+            
+            my_action = self.evaluate_postflop_v2(state.hole_cards, state.community_cards, my_equity, pot_odds)
+            my_hand_strength = my_action.split(":")[1].split("-")[0].strip() if ":" in my_action else ""
         
         # Analyze all players
         players_info = self.analyze_all_players(state)
         
+        # Final structured decision for automation
+        structured_action = self.parse_action_to_struct(my_action, state)
+        
         return {
             "my_action": my_action,
-            "my_equity": my_equity,
+            "decision": structured_action, # {"action": "CALL", "amount": 100}
+            "my_equity": my_equity * 100.0,
+            "pot_odds": pot_odds * 100.0,
             "my_hand_strength": my_hand_strength,
             "position": pos_code,
             "players": players_info
         }
+
+    def get_call_amount(self, state: GameState) -> int:
+        """Estimates the amount needed to call."""
+        # This is hard to get exactly from WS without 'toCall' field.
+        # But we can try to guess it by looking at other players' current street bets.
+        # Or just use the action buttons later in poker_client.
+        return 0 # Placeholder: will be determined by UI buttons in client for now
+
+    def get_preflop_equity(self, hole_cards) -> float:
+        # Very rough estimation of preflop equity vs 1 opponent
+        # Pair: ~50-80%
+        # AKs: ~65%
+        # Random: ~30%
+        hand_str = self.get_hand_string(hole_cards)
+        if hand_str[0] == hand_str[1]: return 0.70 # PP
+        if "A" in hand_str or "K" in hand_str: return 0.55
+        return 0.35
+
+    def parse_action_to_struct(self, action_str, state):
+        """Converts human string to machine action."""
+        # e.g. "RAISE/CALL" -> {"action": "RAISE", "amount": 0}
+        clean = action_str.split("-")[-1].strip().upper()
+        main_action = clean.split("/")[0]
+        
+        if "弃牌" in action_str: return {"action": "FOLD", "amount": 0}
+        if "过牌" in action_str: return {"action": "CHECK", "amount": 0}
+        if "跟注" in action_str: return {"action": "CALL", "amount": 0}
+        
+        # Raise logic with sizing
+        amount = 0
+        if "加注" in action_str or "BET" in action_str:
+            if "2/3 POT" in action_str:
+                amount = int(state.pot * 0.66)
+            elif "1/2 POT" in action_str:
+                amount = int(state.pot * 0.5)
+            elif "POT" in action_str:
+                amount = state.pot
+            else:
+                 amount = int(state.pot * 0.5) 
+            
+            # Ensure minimum raise? Or jitter
+            from ..core.utils import get_randomized_amount
+            amount = get_randomized_amount(amount)
+            return {"action": "RAISE", "amount": amount}
+
+        if "全下" in action_str: return {"action": "ALL-IN", "amount": 0}
+        
+        return {"action": "CHECK", "amount": 0}
+
+    def evaluate_postflop_v2(self, hole_cards, community_cards, equity, pot_odds):
+        hand_desc = self.evaluate_postflop(hole_cards, community_cards)
+        street = hand_desc.split(":")[0]
+        hand_strength = hand_desc.split(":")[1].split("-")[0].strip()
+        
+        # EV analysis
+        if equity > pot_odds + 0.2: # Very strong edge
+             action = "加注 (2/3 POT)"
+        elif equity > pot_odds + 0.1: # Moderate edge
+             action = "加注 (1/2 POT)"
+        elif equity > pot_odds:
+             action = "跟注"
+        else:
+             action = "过牌/弃牌"
+             
+        # Override with monster hands
+        if hand_strength in ["四条", "葫芦", "三条", "同花", "顺子"]:
+             action = "加注 (POT)"
+             
+        return f"{street}: {hand_strength} - {action}"
+
 
     def get_position_code(self, state: GameState) -> str:
         """Returns position code: EP, MP, LP, SB, or ALL (unknown)."""
@@ -314,13 +396,11 @@ class DecisionEngine:
             # Estimate hand range based on actions
             hand_range = self.estimate_hand_range(player)
             
-            # Estimate equity (simplified - would need more complex calculation)
-            equity = self.estimate_player_equity(player, state)
+            # Classification
+            tag = self.get_player_tag(player)
             
-            # Check if we have visible cards for this player
-            visible_cards = []
-            # Note: Currently we don't track other players' visible cards
-            # This would need to be added to GameState if cards are shown
+            # Estimate equity
+            equity = self.estimate_player_equity(player, state)
             
             player_info = {
                 "seat_id": seat_id,
@@ -328,6 +408,9 @@ class DecisionEngine:
                 "chips": player.chips,
                 "status": player.status,
                 "is_active": player.is_active,
+                "tag": tag,
+                "vpip": f"{player.vpip:.1f}%",
+                "pfr": f"{player.pfr:.1f}%",
                 "hand_range": hand_range,
                 "equity": equity,
                 "visible_cards": visible_cards,
@@ -337,6 +420,27 @@ class DecisionEngine:
             players_info.append(player_info)
         
         return players_info
+
+    def get_player_tag(self, player) -> str:
+        """Classifies player based on stats."""
+        if player.hands_played < 5:
+            return "样本不足"
+            
+        vpip = player.vpip
+        pfr = player.pfr
+        
+        if vpip > 40 and pfr < 10:
+            return "跟注站 (Calling Station)"
+        if vpip > 50 and pfr > 30:
+            return "疯子 (Maniac)"
+        if vpip < 15:
+            return "紧逼 (Nit/Tight)"
+        if vpip < 25 and pfr > 15:
+            return "紧凶 (TAG)"
+        if vpip > 30 and pfr < 15:
+            return "宽松被动 (Fish)"
+            
+        return "普通 (Average)"
 
     def estimate_hand_range(self, player) -> str:
         """Estimates a player's hand range based on their actions."""
