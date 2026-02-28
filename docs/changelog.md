@@ -18,6 +18,11 @@
 - 在 `src/core/utils.py` 引入高斯分布的随机延迟函数，模拟真人思考点击节奏。
 - 生成明确的百万路程规划 (`1m_chip_strategy.md`) 和 `run_bot.md` 工作流。
 
+### 🧠 策略引擎与 GTO 进化
+- **EV 决策模型**: 结合 `Monte Carlo` 胜率与 `Pot Odds` (底池赔率) 进行数学期望分析，支持更合理的 +EV Call/Fold 选择。
+- **下注尺度 (Bet Sizing)**: 细化加注逻辑，区分 1/2 POT, 2/3 POT 和 POT 等不同力度。
+- **对手画像 (Profiling)**: 实现基于 VPIP 和 PFR 的自动打标签功能（如 NIT, MANIAC, CALLING STATION），并实时显示在分析面板中。
+
 ### 🔄 Ralph Loop 自动化增强
 - **大厅自动化**: 实现 `navigate_to_lobby` 和 `apply_lobby_filters`，支持自动寻找 Texas Hold'em 常规桌。
 - **自动入座**: 实现 `sit_and_buyin` 逻辑，自动寻找空位并处理买入弹窗。
