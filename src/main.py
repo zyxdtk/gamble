@@ -1,112 +1,217 @@
 import sys
 import os
+import asyncio
+import argparse
 from pathlib import Path
 
-# Add project root to sys.path to allow absolute imports from src
+# Add project root to sys.path
 project_root = str(Path(__file__).parent.parent)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-import asyncio
-import argparse
-from rich.console import Console
-from rich.panel import Panel
-from rich.layout import Layout
-from rich.live import Live
-from rich.text import Text
+from src.bot.task_manager import TaskManager, TaskConfig, TaskType
 
-from src.bot.poker_client import ReplayPokerClient
-from src.engine.brain import PokerBrain
 
-console = Console()
+async def main():
+    parser = argparse.ArgumentParser(
+        description="Poker Bot - Auto play poker with AI strategy",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Assist mode (default) - AI provides suggestions
+  python src/main.py
 
-class GameUI:
-    def __init__(self, auto_mode=False):
-        self.brain = PokerBrain()
-        self.client = ReplayPokerClient(headless=False, auto_mode=auto_mode)
-        self.layout = Layout()
-        self.layout.split_column(
-            Layout(name="header", size=3),
-            Layout(name="body"),
-            Layout(name="footer", size=3)
-        )
-        self.layout["header"].update(Panel("Texas Hold'em AI Assistant", style="bold green"))
-        self.layout["footer"].update(Panel("Waiting for game connection...", style="dim"))
+  # Auto mode - AI plays automatically
+  python src/main.py --mode auto
 
-    def generate_view(self, state):
-        hole_cards = state.hole_cards
-        community_cards = state.community_cards
-        pot = state.pot
-        
-        # Analyze Hand
-        if hole_cards and community_cards:
-            score, hand_class = self.brain.evaluate_hand(hole_cards, community_cards)
-            strength = self.brain.get_percentage_strength(score)
-            advice = f"Hand: {hand_class} (Strength: {strength:.1%})"
-            color = "green" if strength > 0.7 else "yellow" if strength > 0.4 else "red"
-        elif hole_cards:
-            advice = "Preflop: Waiting for board..."
-            color = "blue"
-        else:
-            advice = "Waiting for deal..."
-            color = "dim"
+  # Auto mode with specific strategy and duration
+  python src/main.py --mode auto --strategy checkorfold --hands 10
 
-        # Body Content
-        body_text = Text()
-        body_text.append(f"\n Hole Cards: {hole_cards}\n", style="bold magenta")
-        body_text.append(f" Community:  {community_cards}\n", style="bold cyan")
-        body_text.append(f" Pot Size:   {pot}\n", style="bold yellow")
-        
-        self.layout["body"].update(Panel(body_text, title="Game State"))
-        self.layout["footer"].update(Panel(advice, style=f"bold {color}"))
-        
-        return self.layout
+  # Auto mode with dealer cycle limit
+  python src/main.py --mode auto --strategy gto --cycles 2
 
-    async def run(self):
-        await self.client.start_browser()
-        print("Browser started. Please login and join a table.")
-        
-        # Support for auto mode in main loop
-        if self.client.auto_mode_enabled:
-             print("[MODE] Running in Fully Autonomous Mode.")
-        else:
-             print("[MODE] Running in Assist Mode.")
+  # Auto mode with profit target
+  python src/main.py --mode auto --strategy gto --profit 1000 --stop-loss 500
 
-        last_log = ""
-        while True:
-            # Check if page closed
-            if self.client.page and self.client.page.is_closed():
-                print("[STOP] Browser page closed. Exiting.", flush=True)
-                break
+  # Apprentice mode - AI observes and learns
+  python src/main.py --mode apprentice
+        """
+    )
 
-            state = await self.client.get_game_state()
-            hole_cards = state.hole_cards
-            community_cards = state.community_cards
-            
-            # Simple Logging
-            current_log = f"Hole: {hole_cards} | Board: {community_cards} | Balance: {self.client.current_balance}"
-            
-            if hole_cards or community_cards:
-                 # Evaluate
-                score, hand_class = self.brain.evaluate_hand(hole_cards, community_cards)
-                strength = self.brain.get_percentage_strength(score)
-                current_log += f" | Rank: {hand_class} ({strength:.1%})"
+    # 模式选择
+    parser.add_argument(
+        "--mode",
+        choices=["assist", "auto", "apprentice"],
+        default="assist",
+        help="运行模式: assist=辅助模式(默认), auto=自动模式, apprentice=学徒模式"
+    )
 
-            if current_log != last_log:
-                print(current_log)
-                last_log = current_log
-            
-            # Handle automation pulse (Lobby, Sitting, Buying, Playing)
-            await self.client.run_automation_tick()
-                
-            await asyncio.sleep(1)
+    # 策略类型
+    parser.add_argument(
+        "--strategy",
+        choices=["gto", "checkorfold", "exploitative"],
+        default="gto",
+        help="使用的策略类型 (默认: gto)"
+    )
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--assist", action="store_true", help="Run in Assist Mode (default)")
-    parser.add_argument("--auto", action="store_true", help="Run in Auto Mode")
+    # 任务类型
+    task_group = parser.add_mutually_exclusive_group()
+    task_group.add_argument(
+        "--hands",
+        type=int,
+        default=None,
+        help="玩多少手牌后自动退出"
+    )
+    task_group.add_argument(
+        "--cycles",
+        type=int,
+        default=None,
+        help="完成多少圈庄家位周期后自动退出"
+    )
+    task_group.add_argument(
+        "--duration",
+        type=int,
+        default=None,
+        help="运行多少分钟后自动退出"
+    )
+    task_group.add_argument(
+        "--profit",
+        type=int,
+        default=None,
+        help="盈利目标（达到此金额后退出）"
+    )
+
+    # 止损
+    parser.add_argument(
+        "--stop-loss",
+        type=int,
+        default=None,
+        help="止损金额（亏损达到此金额后退出）"
+    )
+
+    # 浏览器选项
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="无头模式运行浏览器（不显示界面）"
+    )
+
+    # 兼容旧参数
+    parser.add_argument("--auto", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--apprentice", action="store_true", help=argparse.SUPPRESS)
+
     args = parser.parse_args()
 
-    # If --auto is specified, run in auto mode
-    ui = GameUI(auto_mode=args.auto)
-    asyncio.run(ui.run())
+    # 处理旧参数兼容
+    if args.auto:
+        args.mode = "auto"
+    elif args.apprentice:
+        args.mode = "apprentice"
+
+    # 创建任务配置
+    if args.mode == "assist":
+        # 辅助模式 - 不使用 TaskManager
+        await run_assist_mode(args)
+    elif args.mode == "apprentice":
+        # 学徒模式
+        await run_apprentice_mode(args)
+    else:
+        # 自动模式 - 使用 TaskManager
+        await run_auto_mode(args)
+
+
+async def run_auto_mode(args):
+    """运行自动模式（使用 TaskManager）"""
+    # 确定任务类型
+    if args.cycles:
+        task_type = TaskType.CYCLES
+        target = args.cycles
+    elif args.hands:
+        task_type = TaskType.HANDS
+        target = args.hands
+    elif args.duration:
+        task_type = TaskType.DURATION
+        target = args.duration
+    elif args.profit:
+        task_type = TaskType.PROFIT_TARGET
+        target = args.profit
+    else:
+        task_type = TaskType.INFINITE
+        target = 0
+
+    # 创建任务配置
+    config = TaskConfig(
+        task_type=task_type,
+        target_value=target,
+        strategy=args.strategy,
+        stop_loss=args.stop_loss
+    )
+
+    # 创建并运行任务
+    task_mgr = TaskManager(config)
+
+    try:
+        await task_mgr.initialize(headless=args.headless)
+        await task_mgr.run()
+    except KeyboardInterrupt:
+        print("\n[MAIN] Stopping by user request...")
+    finally:
+        await task_mgr.stop()
+
+
+async def run_assist_mode(args):
+    """运行辅助模式（传统方式）"""
+    from src.bot.browser_manager import BrowserManager
+
+    os.environ["POKER_STRATEGY"] = args.strategy
+
+    manager = BrowserManager(
+        headless=args.headless,
+        auto_mode=False,
+        apprentice_mode=False
+    )
+
+    try:
+        await manager.start()
+        print("\n" + "="*50)
+        print("🚀 ASSIST MODE: AI will provide suggestions in terminal.")
+        print("="*50 + "\n")
+
+        while True:
+            await manager.run_tick()
+            await asyncio.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\n[MAIN] Stopping...")
+    finally:
+        await manager.stop()
+
+
+async def run_apprentice_mode(args):
+    """运行学徒模式"""
+    from src.bot.browser_manager import BrowserManager
+
+    manager = BrowserManager(
+        headless=args.headless,
+        auto_mode=False,
+        apprentice_mode=True
+    )
+
+    try:
+        await manager.start()
+        print("\n" + "="*50)
+        print("🚀 APPRENTICE MODE: AI will observe and log your play.")
+        print("="*50 + "\n")
+
+        while True:
+            await manager.run_tick()
+            await asyncio.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\n[MAIN] Stopping...")
+    finally:
+        await manager.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

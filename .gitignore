@@ -16,3 +16,4 @@ data/
 # OS generated
 .DS_Store
 logs/
+.pytest_cache/

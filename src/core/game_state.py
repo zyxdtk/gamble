@@ -35,6 +35,9 @@ class GameState:
     my_seat_id: Optional[int] = None
     active_seat: Optional[int] = None
     to_call: int = 0
+    min_raise: int = 0
+    max_raise: int = 0
+    available_actions: List[str] = field(default_factory=list)
     players: Dict[int, Player] = field(default_factory=dict)
     my_initial_chips: int = 0
     total_chips: int = 0 # Current account balance (on-table + bank)

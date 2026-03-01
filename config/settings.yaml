@@ -1,20 +1,33 @@
 bot:
-  name: "RalphBot"
+  name: "zyxdtk"
   headless: false
   session_timeout_min: 300
   target_profit: 1000000
 
+player:
+  username: "zyxdtk"   # 用于判断自己是否已入座（Seat__username 比对）
+  buyin_amount: 200     # 默认买入筹码数（单桌，单位：筹码）
+
 strategy:
+  type: "gto"  # options: gto, exploitative, checkorfold
   style: "TAG"  # Tight-Aggressive
+  thinking_timeout: 2.0  # 思考时间限制（秒），超时则使用现有行动方案
   anti_ban:
     min_action_delay: 2.0
     max_action_delay: 4.5
     jitter_amount: 0.05
-  bankroll_management:
-    min_buy_ins: 20
-    stop_loss_bb: 500  # Exit session if lost 5 buy-ins
 
 game:
-  preferred_stakes: "1/2"
+  preferred_stakes: "1/2"   # 格式：小盲/大盲，用于解析 big_blind 的回退值
+  max_small_blind: 10       # 大于此小盲的牌桌不加入
+  max_tables: 1             # 同时参与的桌数
   game_type: "Texas Hold'em"
   mode: "Ring Games"
+
+  # 止损/止盈：以大盲注（BB）为单位
+  # 示例：1/2 桌，big_blind=2，stop_loss_bb=100 → 亏损 200 筹码即离桌
+  exit_thresholds:
+    stop_loss_bb: 100     # 亏损超过 N 个 BB 时离桌
+    take_profit_bb: 300   # 盈利超过 N 个 BB 时离桌
+    low_chips_bb: -1      # 桌上筹码不足 N 个 BB 时离桌（短码预警）
+    max_chips_bb: 400     # 桌上筹码超过 N 个 BB 时离桌（防止筹码过多）
