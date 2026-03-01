@@ -322,7 +322,7 @@ class GTOBrain(Brain):
                 return ActionPlan(
                     primary_action=ActionType.CHECK,
                     fallback_action=ActionType.FOLD,
-                    fold_threshold=int(pot * 0.15),
+                    fold_threshold=0,
                     reasoning=f"EV为负弃牌 ({hand_str}) EV:{ev_result['call_ev']}"
                 )
 
@@ -331,7 +331,7 @@ class GTOBrain(Brain):
                 return ActionPlan(
                     primary_action=ActionType.CHECK,
                     fallback_action=ActionType.FOLD,
-                    fold_threshold=int(pot * 0.2),
+                    fold_threshold=0,
                     reasoning=f"对抗跟注站弃牌 ({hand_str})"
                 )
 
@@ -340,7 +340,7 @@ class GTOBrain(Brain):
                 return ActionPlan(
                     primary_action=ActionType.CHECK,
                     fallback_action=ActionType.FOLD,
-                    fold_threshold=int(pot * 0.2),
+                    fold_threshold=0,
                     reasoning=f"多人底池弱牌弃牌 ({hand_str})"
                 )
 
@@ -349,7 +349,7 @@ class GTOBrain(Brain):
                 return ActionPlan(
                     primary_action=ActionType.CHECK,
                     fallback_action=ActionType.FOLD,
-                    fold_threshold=int(pot * 0.2),
+                    fold_threshold=0,
                     reasoning=f"大注弃牌 ({hand_str})"
                 )
 
@@ -367,7 +367,7 @@ class GTOBrain(Brain):
         return ActionPlan(
             primary_action=ActionType.CHECK,
             fallback_action=ActionType.FOLD,
-            fold_threshold=int(pot * 0.2),
+            fold_threshold=0,
             reasoning=f"弱牌弃牌 ({hand_str}) Equity: {equity:.1%}"
         )
     

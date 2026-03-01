@@ -20,7 +20,7 @@ class ActionPlan:
     fallback_amount: int = 0
     
     call_range_min: int = 0
-    call_range_max: int = 999999999
+    call_range_max: int = 0  # 默认为 0，表示不主动跟注
     
     raise_range_min: int = 0
     raise_range_max: int = 999999999
@@ -51,6 +51,10 @@ class ActionPlan:
         if to_call > self.raise_range_max:
             return self.fallback_action, self.fallback_amount
         
+        # 兜底安全性校验：如果有下注，且主要动作为 CHECK，则强制降级到 fallback
+        if to_call > 0 and self.primary_action == ActionType.CHECK:
+            return self.fallback_action, self.fallback_amount
+
         return self.primary_action, self.primary_amount
 
     def to_dict(self) -> dict:

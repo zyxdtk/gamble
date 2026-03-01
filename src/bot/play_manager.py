@@ -274,28 +274,39 @@ class PlayManager:
         # 3. 兜底：直接往 input 框填数字
         if amount <= 0:
             return False
+            
+        print(f"[ACTION] 尝试通过 input 输入金额: {amount}...", flush=True)
         
+        # 增加多种输入框选择器，包含 ReplayPoker 常见的类名
         number_selectors = [
             "input.m-bet-input__input",
+            "input.m-bet-field__input",
             ".m-bet-input input",
             ".m-bet-controls input",
             "input[type='number']",
             "input[type='text'][pattern='[0-9]*']",
-            "input[class*='Amount']",
-            "input[class*='Bet']",
             "input[class*='input']",
         ]
+        
         for sel in number_selectors:
             try:
+                # 显式等待输入框出现（缩短超时时间防止卡死）
                 el = page.locator(sel).first
-                if await el.count() > 0 and await el.is_visible():
-                    await el.click(click_count=3)
-                    await page.keyboard.press("Control+a")
-                    await el.fill(str(amount))
-                    await asyncio.sleep(0.2)
-                    await el.press("Enter")
-                    print(f"[ACTION] ✅ input 兜底设置金额: {amount} (selector: {sel})", flush=True)
-                    return True
+                if await el.count() == 0:
+                    continue
+                
+                await el.wait_for(state="visible", timeout=1500)
+                
+                # 清理并输入
+                await el.click(click_count=3)
+                await page.keyboard.press("Backspace")
+                await el.fill(str(amount))
+                await asyncio.sleep(0.3)
+                
+                # 模拟按下 Enter 确认金额
+                await el.press("Enter")
+                print(f"[ACTION] ✅ input 成功设置金额: {amount} (selector: {sel})", flush=True)
+                return True
             except Exception:
                 continue
         

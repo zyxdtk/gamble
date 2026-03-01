@@ -27,7 +27,7 @@ game:
   # 止损/止盈：以大盲注（BB）为单位
   # 示例：1/2 桌，big_blind=2，stop_loss_bb=100 → 亏损 200 筹码即离桌
   exit_thresholds:
-    stop_loss_bb: 100     # 亏损超过 N 个 BB 时离桌
+    stop_loss_bb: 250     # 亏损超过 N 个 BB 时离桌
     take_profit_bb: 300   # 盈利超过 N 个 BB 时离桌
     low_chips_bb: -1      # 桌上筹码不足 N 个 BB 时离桌（短码预警）
-    max_chips_bb: 400     # 桌上筹码超过 N 个 BB 时离桌（防止筹码过多）
+    max_chips_bb: 800     # 桌上筹码超过 N 个 BB 时离桌（防止筹码过多）

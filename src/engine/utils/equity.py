@@ -128,8 +128,8 @@ class EquityCalculator:
         街道越靠后（Turn/River）→ 对手已经投入更多，弃牌率越低
         """
         if opp_vpip <= 0:
-            return 0.40  # 无统计数据时给默认中性估计
-        base_fold_rate = min(0.75, max(0.10, (opp_vpip - 10) / 80))
+            return 0.25  # 下调默认期望：低级别对局对手更倾向于跟注而非弃牌
+        base_fold_rate = min(0.60, max(0.10, (opp_vpip - 10) / 80))
         street_factor = {"preflop": 1.0, "flop": 0.85, "turn": 0.70, "river": 0.50}
         factor = street_factor.get(street.lower(), 0.75)
         return round(base_fold_rate * factor, 2)

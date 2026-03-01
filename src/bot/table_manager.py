@@ -204,6 +204,11 @@ class TableManager:
             elif action == "startHand":
                 if "dealerSeat" in update:
                     self.state.current_dealer_seat = update.get("dealerSeat")
+                # 记录 Hand ID 并在全局增加所有选手的 hands_played
+                self.state.hand_id = update.get("id", 0)
+                for seat, player in self.state.players.items():
+                    if player.status != "sit_out":
+                        player.hands_played += 1
             elif action == "blinds":
                 self.big_blind = update.get("minimumRaise", self.big_blind)
             elif action == "tick":
@@ -228,6 +233,25 @@ class TableManager:
                     if user_id and seat_id is not None:
                         # 仅做记录，不直接设置为 my_seat_id
                         print(f"[WS] Seat update detected: userId={user_id}, seat={seat_id}", flush=True)
+            
+            # --- 统计 VPIP 和 PFR 行为 ---
+            if action in ["bet", "call", "raise"]:
+                seat = update.get("seatId")
+                if seat in self.state.players:
+                    player = self.state.players[seat]
+                    hand_id = getattr(self.state, "hand_id", 0)
+                    # 标记参与了本局 (VPIP)
+                    if not hasattr(player, "_vpip_counted_hand"): player._vpip_counted_hand = -1
+                    if player._vpip_counted_hand != hand_id:
+                        player.vpip_actions += 1
+                        player._vpip_counted_hand = hand_id
+                    
+                    # 标记加注 (PFR)
+                    if action == "raise" or action == "bet":
+                        if not hasattr(player, "_pfr_counted_hand"): player._pfr_counted_hand = -1
+                        if player._pfr_counted_hand != hand_id:
+                            player.pfr_actions += 1
+                            player._pfr_counted_hand = hand_id
 
         # 更新游戏状态到引擎（PlayManager 负责引擎交互）
         self.play_mgr.update_brain_state()
