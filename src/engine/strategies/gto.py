@@ -204,6 +204,30 @@ class GTOBrain(Brain):
         call_amount = state.to_call
         pot = state.pot
         pot_odds = call_amount / (pot + call_amount) if (pot + call_amount) > 0 else 0
+        
+        # ── SPR (Stack-to-Pot Ratio) 分析 ────────────────────────────────────────
+        # 有效筹码（我们面对的威胁，简化为我方当前筹码）
+        effective_stack = state.total_chips
+        spr = effective_stack / pot if pot > 0 else 20
+        
+        # 调整阈值 - 默认安全边际
+        call_threshold = pot_odds + 0.05
+        raise_threshold = pot_odds + 0.20
+        
+        spr_adjustment = ""
+        if spr < 2.0:
+            # 筹码极浅（Committed）：胜率要求大幅降低，准备梭哈
+            call_threshold -= 0.10
+            raise_threshold -= 0.15
+            spr_adjustment = " [SPR极浅-套池模式]"
+        elif spr > 12.0:
+            # 筹码极深 (Deep Stacked)：对“一对”牌型提高门槛，防止被清空
+            # 只有当胜率极高或手牌是超强组合（三条及以上）时才打大底池
+            call_threshold += 0.08
+            raise_threshold += 0.10
+            spr_adjustment = " [SPR极深-防御模式]"
+
+        print(f"[GTO SPR] Pot:{pot}, Stack:{effective_stack}, SPR:{spr:.2f}{spr_adjustment}", flush=True)
 
         opponents = [p for p in state.players.values() if p.is_active and p.status != "folded"]
         is_against_nit = any(get_player_tag(p) == "紧逼 (Nit/Tight)" for p in opponents)

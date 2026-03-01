@@ -91,6 +91,7 @@ class ActionPlan:
     primary_amount: int             # 主要行动金额
     fallback_action: ActionType     # 备选行动
     fallback_amount: int            # 备选行动金额
+    bet_size_hint: str              # 加注尺度提示 (min, half_pot, pot, max)
     call_range_min: int             # 跟注范围下限
     call_range_max: int             # 跟注范围上限
     raise_range_min: int            # 加注范围下限
@@ -171,23 +172,32 @@ def _create_preflop_plan(state, hand_str, pos_code):
 ```python
 def _create_postflop_plan(state, hand_str):
     equity = calculate_equity(hole_cards, community_cards, num_opponents)
-    pot_odds = to_call / (pot + to_call)
     
-    # 超强牌 (>70% equity): 大额价值下注
-    if equity > 0.70:
-        return RAISE(pot * 0.75)
+    # SPR (Stack-to-Pot Ratio) 分析
+    spr = effective_stack / pot
+    # 动态调整阈值：SPR < 2 (Committed) 时加注/跟注阈值降低 10-15%
     
-    # 强牌 (> pot_odds + 15%): 标准价值下注
-    if equity > raise_threshold:
-        return RAISE(pot * 0.66, call_range_max=pot*0.5)
+    # EV (Expected Value) 计算
+    ev = calculate_ev(equity, pot, to_call, planned_raise, fold_equity)
     
-    # 中等牌 (> pot_odds): 跟注
-    if equity > call_threshold:
-        return CALL(max=pot*0.5, fallback=CHECK)
+    # 最优加注尺度求解 (EV 最大化)
+    opt = find_optimal_raise_size(equity, pot, min_raise, stack)
+    # 返回最优金额与 bet_size_hint (对应 UI 快捷按钮)
+
+    # 决策流：优先使用 EV 最大化，辅助以胜率阈值
+    if ev.best_action == "RAISE" or equity > 0.70:
+        return RAISE(opt.amount, hint=opt.hint)
     
-    # 弱牌: 过牌/弃牌
-    return CHECK/FOLD(fold_threshold=pot*0.3)
+    # 中等牌: 根据 EV 决定是否跟注
+    if ev.call_ev > 0:
+        return CALL(max=pot*0.5)
+    
+    return FOLD
 ```
+
+**SPR 状态机：**
+- **套池 (SPR < 2)**: 自动锁定跟注/全下，顶对即 Nuts。
+- **深筹码 (SPR > 12)**: 进入防御模式，一对牌型门槛提高，防止大牌赢小池。
 
 **对手类型调整（在 GTO 基础上）：**
 - 对抗 Nit: `call_threshold += 0.10`, `raise_threshold += 0.15`
@@ -251,24 +261,24 @@ if opp_types["fish"] > 0:
         plan.call_range_max *= 1.3  # 对Fish宽跟注
 ```
 
-#### 翻牌后剥削策略
+#### 强化弃牌与风控 (Disciplined Folding)
 
-**对抗紧逼型:**
-- 价值下注加大 30% (equity > 60%)
-- 诈唬减少注码 30% (equity < 40%)
+剥削策略引入了多重风控，防止 AI 在落后时“粘池”：
 
-**对抗疯子:**
-- 用更宽的范围抓诈唬 (equity > 30% 就 CALL)
-- 绝不诈唬加注
+1. **敌对等级 (Hostility Level)**:
+   - 分析对手行动线（如 Check-Raise 为 Level 3）。
+   - Level 3 敌对下，有效胜率直接打 **0.65** 折。
 
-**对抗跟注站:**
-- 纯价值策略：强牌下重注 (equity > 55% 加注 50%)
-- 绝不诈唬
-- 边缘牌直接弃牌 (equity < 35%)
+2. **弱牌止损墙 (Weak Hand Kill Switch)**:
+   - 如果持有 **高牌/底对** 且面对 >0.4 pot 的下注，在转牌/河牌圈**强制 FOLD**。
 
-**对抗鱼:**
-- 更宽的价值下注范围 (equity > 45%)
-- 更宽的跟注范围 (1.4x)
+3. **危险牌面感知 (Board Danger)**:
+   - 自动检测公牌的**对子**（葫芦风险）和**三同花**（同花风险）。
+   - 危险牌面下，中等强度对子的信心调低 20%。
+
+4. **SPR 隐含赔率调整**:
+   - **SPR 高**时，对听牌（同花/顺子）增加 5% 信心（隐含赔率大）。
+   - **SPR 低**时，严格按数学赔率弃掉所有不成牌。
 
 #### 策略对比
 
@@ -286,10 +296,11 @@ if opp_types["fish"] > 0:
 ## 公共工具
 
 ### EquityCalculator
-胜率计算器（单例）：
-- 使用 treys 库进行蒙特卡洛模拟
-- 支持翻牌前快速估算
-- 支持多对手场景
+胜率与价值计算器（单例）：
+- 使用 `treys` 库进行精准牌型识别与蒙特卡洛模拟。
+- **EV 计算**：计算 FOLD/CALL/RAISE 的期望筹码收益。
+- **Fold Equity 估算**：根据对手 VPIP 和街道动态估算对方弃牌率。
+- **最优尺度查找**：通过网格搜索候选加注档位，找到 EV 最大化的下注量。
 
 ### RangeManager
 起手牌范围管理器（单例）：

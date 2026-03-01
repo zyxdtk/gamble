@@ -244,21 +244,30 @@ class PlayManager:
         
         # 2. 尝试点击对应的快捷按钮
         if bet_size_hint and bet_size_hint in PRESET_BUTTONS:
-            candidates = PRESET_BUTTONS[bet_size_hint]
-            for label in candidates:
+            labels = PRESET_BUTTONS[bet_size_hint]
+            print(f"[ACTION] 尝试匹配快捷按钮: {bet_size_hint} (Candidate labels: {labels})", flush=True)
+            
+            for label in labels:
                 try:
-                    # 同时尝试 button 和普通 div/span 点击
-                    for selector in [
+                    # 组合多种定位策略：文本匹配、正则匹配、以及常见类名匹配
+                    selectors = [
                         f"button:has-text('{label}')",
+                        f".m-bet-controls__preset:has-text('{label}')",
+                        f".m-btn:has-text('{label}')",
                         f"[role='button']:has-text('{label}')",
-                        f"*:has-text('{label}')",
-                    ]:
+                        f"div[class*='preset']:has-text('{label}')",
+                        f"span:has-text('{label}')",
+                    ]
+                    
+                    for selector in selectors:
                         el = page.locator(selector).first
                         if await el.count() > 0 and await el.is_visible():
+                            # 在点击前稍微等待，确保 UI 已响应
+                            await asyncio.sleep(0.1)
                             await el.click()
                             print(f"[ACTION] ✅ 点击快捷按钮 [{label}] 设置加注尺度 ({bet_size_hint})", flush=True)
                             return True
-                except Exception:
+                except Exception as e:
                     continue
             print(f"[ACTION] ⚠️ 未找到快捷按钮 ({bet_size_hint})，降级为 input 输入", flush=True)
         
