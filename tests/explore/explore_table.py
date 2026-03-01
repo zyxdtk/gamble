@@ -1,133 +1,210 @@
 """
-explore_table.py — 牌桌页面探索工具
+explore_table.py — 牌桌页面探索工具 (增强版 v3)
 
 用途：
-    打开一个已知的牌桌 URL，截图并保存 HTML，便于离线分析页面结构。
-    用于开发阶段探索以下元素的定位方式：
-      - 玩家列表与座位（含自己的名字）
-      - 手牌 / 公共牌区域
-      - 底池、盲注信息
-      - 行动按钮（Fold / Check / Call / Raise）
-      - 入座按钮（Seat Me Anywhere / 空座位）
-      - Buy-in 弹窗
-      - 满员提示（Join Waiting List 按钮）
+    打开大厅，自动选择一个桌子进入，等待行动，点击 Raise 截图分析 DOM。
 
 运行方式：
-    cd /path/to/gamble
-    source .venv/bin/activate
-    python tests/explore_table.py [table_url]
-
-    若不传 table_url，脚本会打开大厅，等待你手动进入牌桌后再抓取。
+    cd /path/to/gamble && source .venv/bin/activate
+    python tests/explore/explore_table.py [table_url]
+    python tests/explore/explore_table.py --manual [table_url]
 """
 
 import asyncio
 import os
 import sys
+import re
 from playwright.async_api import async_playwright
 
 # ─── 配置区 ───────────────────────────────────────────────────────────────────
-USER_DATA_DIR = "./data/browser_data"
-OUTPUT_HTML   = "data/table_explore.html"
-OUTPUT_SHOT   = "data/table_screenshot.png"
-WAIT_SECONDS  = 30   # 等待你手动导航/登录的时间（秒）
+USER_DATA_DIR     = "./data/browser_data"
+OUTPUT_HTML       = "data/table_explore.html"
+OUTPUT_SHOT       = "data/table_screenshot.png"
+OUTPUT_RAISE_SHOT = "data/raise_button_screenshot.png"
+POLL_INTERVAL     = 2
+MAX_WAIT          = 300  # 秒
 
 
-async def explore(table_url: str | None = None):
+async def explore(table_url: str | None = None, manual: bool = False):
     async with async_playwright() as p:
         os.makedirs(USER_DATA_DIR, exist_ok=True)
 
-        print("🚀 启动浏览器...")
+        print("🚀 启动浏览器（使用 data/browser_data 已登录会话）...")
         context = await p.chromium.launch_persistent_context(
             USER_DATA_DIR,
             headless=False,
             channel="chrome",
             args=["--disable-blink-features=AutomationControlled"]
         )
-
         page = context.pages[0] if context.pages else await context.new_page()
 
-        # ── 导航 ──────────────────────────────────────────────────────────────
+        # ── 导航到牌桌 ────────────────────────────────────────────────────────
         if table_url:
             print(f"📍 直接导航到牌桌: {table_url}")
-            await page.goto(table_url)
-            print(f"⏳ 等待 {WAIT_SECONDS} 秒，让页面完全加载...")
-            await asyncio.sleep(WAIT_SECONDS)
+            await page.goto(table_url, wait_until="domcontentloaded")
+            await asyncio.sleep(8)
         else:
-            print("📍 未指定牌桌 URL，打开大厅，请手动进入一个牌桌...")
-            await page.goto("https://www.replaypoker.com/lobby")
-            print(f"⏳ 等待 {WAIT_SECONDS} 秒，请在浏览器中手动进入牌桌...")
-            await asyncio.sleep(WAIT_SECONDS)
-            print(f"   当前页面 URL: {page.url}")
+            # 自动从大厅找一个桌子
+            print("📍 打开大厅，自动找一个有空位的桌子...")
+            await page.goto("https://www.replaypoker.com/lobby", wait_until="domcontentloaded")
+            await asyncio.sleep(5)
 
-        # ── 检查是否真正进入了牌桌 ────────────────────────────────────────────
+            # 找牌桌链接（<a href="/table/XXXX">）
+            table_links = await page.locator("a[href*='/table/']").all()
+            if not table_links:
+                # 尝试备用选择器
+                table_links = await page.locator(
+                    "a[href*='table'], [class*='table-row'] a, [class*='lobby-games-list'] a"
+                ).all()
+
+            if table_links:
+                href = await table_links[0].get_attribute("href")
+                if href and not href.startswith("http"):
+                    href = "https://www.replaypoker.com" + href
+                print(f"✅ 找到牌桌链接：{href}")
+                await page.goto(href, wait_until="domcontentloaded")
+                await asyncio.sleep(8)
+            else:
+                print("⚠️  未找到牌桌链接，请手动进入一个牌桌（等待 60 秒）...")
+                await asyncio.sleep(60)
+
         current_url = page.url
-        print(f"   当前页面 URL: {current_url}")
+        print(f"   当前 URL: {current_url}")
         if "/table/" not in current_url:
-            print(f"⚠️  警告: 当前页面不是牌桌页面（URL 中没有 /table/）")
-            print(f"   请确认你已手动进入一个牌桌，或通过命令行参数传入牌桌 URL：")
-            print(f"   python tests/explore_table.py https://www.replaypoker.com/table/XXXXX")
+            print("⚠️  仍不在牌桌页面！")
 
-        # ── 截图 & 保存 HTML ──────────────────────────────────────────────────
-        try:
-            await page.screenshot(path=OUTPUT_SHOT, full_page=True)
-            html = await page.content()
-            with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
-                f.write(html)
-            print(f"✅ 截图已保存: {OUTPUT_SHOT}")
-            print(f"✅ HTML 已保存: {OUTPUT_HTML}")
-        except Exception as e:
-            print(f"⚠️  截图/保存失败（页面可能已关闭）: {e}")
+        # ── 不坐下，直接进行 DOM 探索（观察者模式）────────────────────────
+        print("\n📷 先截图保存当前状态...")
+        await _save_snapshot(page, OUTPUT_SHOT, OUTPUT_HTML)
 
-        # ── 元素探索 ─────────────────────────────────────────────────────────
+        # ── 探索初始 DOM（行动前）────────────────────────────────────────────
         print("\n" + "=" * 60)
-        print("🔍 开始探索页面元素...")
+        print("🔍 探索初始 DOM（观察者模式）...")
         print("=" * 60)
+        await _probe_all(page, phase="initial")
 
-        # 1. 玩家列表 / 座位
-        await _probe(page, "玩家座位区",
-            selectors=["[class*='seat']", "[class*='player']", "[data-seat]"])
+        if manual:
+            print(f"\n⏳ 手动模式：每 5 秒自动截图+分析 DOM，共 {MAX_WAIT}s，请在浏览器里操作...")
+            for tick in range(MAX_WAIT // 5):
+                await asyncio.sleep(5)
+                elapsed = (tick + 1) * 5
+                try:
+                    shot_path = f"data/raise_explore_{elapsed:04d}s.png"
+                    await page.screenshot(path=shot_path, full_page=False)
+                    html = await page.content()
+                    with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
+                        f.write(html)
+                    print(f"\n📷 [{elapsed}s] 截图: {shot_path}")
+                    await _probe_all(page, phase=f"{elapsed}s")
+                    await _dump_raise_html(page)
+                except Exception as e:
+                    print(f"  [{elapsed}s] 截图失败: {e}")
+            print("⏱  手动模式探索结束。")
+        else:
+            # ── 自动模式：等待 Raise/Bet 按钮出现并点击 ─────────────────────
+            print(f"\n🤖 自动等待 Raise/Bet 按钮（最多 {MAX_WAIT}s）...")
+            raise_clicked = False
+            for i in range(int(MAX_WAIT / POLL_INTERVAL)):
+                try:
+                    for btn_text in ["Raise", "Bet"]:
+                        btn = page.get_by_role("button", name=re.compile(f"^{btn_text}", re.I))
+                        if await btn.count() > 0 and await btn.first.is_visible():
+                            print(f"\n✅ 发现 '{btn_text}' 按钮！点击...")
+                            await btn.first.click()
+                            await asyncio.sleep(2)
+                            raise_clicked = True
+                            break
+                    if raise_clicked:
+                        break
+                except Exception:
+                    pass
 
-        # 2. 公共牌 / 手牌
-        await _probe(page, "公共牌 / 手牌",
-            selectors=["[class*='community']", "[class*='hole']",
-                       "[class*='card']", "[class*='board']"])
+                if i % 10 == 0:
+                    print(f"   等待 {i * POLL_INTERVAL}s / {MAX_WAIT}s", flush=True)
+                await asyncio.sleep(POLL_INTERVAL)
 
-        # 3. 底池 / 盲注
-        await _probe(page, "底池 / 盲注信息",
-            selectors=["[class*='pot']", "[class*='blind']", "[class*='chips']"])
-
-        # 4. 行动按钮（真实激活态）
-        await _probe(page, "行动按钮 (Fold/Check/Call/Raise)",
-            selectors=["button:has-text('Fold')", "button:has-text('Check')",
-                       "button:has-text('Call')",  "button:has-text('Raise')",
-                       "button:has-text('Bet')",   "button:has-text('All In')"])
-
-        # 5. 入座相关
-        await _probe(page, "入座按钮",
-            selectors=["button:has-text('Seat Me')", "button:has-text('Sit')",
-                       "[class*='empty-seat']", "[class*='open-seat']"])
-
-        # 6. Buy-in 弹窗（触发后才会出现，此时可能不可见）
-        await _probe(page, "Buy-in 弹窗",
-            selectors=["[class*='buyin']", "[class*='buy-in']",
-                       "dialog", "[role='dialog']"])
-
-        # 7. 满员标志
-        await _probe(page, "满员标志 (Join Waiting List)",
-            selectors=["button:has-text('Join Waiting List')",
-                       "button:has-text('Waiting')", "[class*='waiting']"])
+            if raise_clicked:
+                print("📷 点击 Raise 后截图...")
+                await _save_snapshot(page, OUTPUT_RAISE_SHOT, OUTPUT_HTML)
+                print("\n" + "=" * 60)
+                print("🔍 探索 Raise 点击后的 DOM...")
+                print("=" * 60)
+                await _probe_all(page, phase="after_raise")
+                await _dump_raise_html(page)
+            else:
+                print("⚠️  未自动点到 Raise 按钮，保存当前截图...")
+                await _save_snapshot(page, OUTPUT_RAISE_SHOT, OUTPUT_HTML)
 
         print("\n" + "=" * 60)
-        print("🏁 探索完成。请查看以下文件进行离线分析：")
-        print(f"   📄 HTML : {OUTPUT_HTML}")
-        print(f"   🖼️  截图 : {OUTPUT_SHOT}")
+        print("🏁 探索完成：")
+        print(f"   📄 HTML  : {OUTPUT_HTML}")
+        print(f"   🖼  截图  : {OUTPUT_SHOT}")
+        print(f"   🖼  Raise截图 : {OUTPUT_RAISE_SHOT}")
         print("=" * 60)
-
         await context.close()
 
 
+async def _save_snapshot(page, shot_path, html_path):
+    try:
+        await page.screenshot(path=shot_path, full_page=False)
+        html = await page.content()
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        print(f"  ✅ 截图: {shot_path} | HTML: {html_path}")
+    except Exception as e:
+        print(f"  ⚠️  保存失败: {e}")
+
+
+async def _probe_all(page, phase=""):
+    label_prefix = f"[{phase}] " if phase else ""
+    probes = [
+        ("行动按钮", ["button:has-text('Fold')", "button:has-text('Check')",
+                      "button:has-text('Call')", "button:has-text('Raise')",
+                      "button:has-text('Bet')", "button:has-text('All In')"]),
+        ("Raise/Bet 金额输入框", ["input[type='number']", "input[type='range']",
+                                   "input[class*='amount']", "input[class*='Amount']",
+                                   "[class*='BetInput']", "[class*='RaiseInput']"]),
+        ("Raise 滑块", ["input[type='range']", "[role='slider']",
+                        "[class*='Slider']", "[class*='slider']"]),
+        ("Raise +/- 按钮", ["button:has-text('+')", "button:has-text('-')",
+                             "button[class*='plus']", "button[class*='minus']",
+                             "button[class*='increment']", "button[class*='decrement']"]),
+        ("Raise 金额容器", ["[class*='BetControls']", "[class*='RaiseControls']",
+                            "[class*='BetAmount']", "[class*='RaiseAmount']",
+                            "[class*='ActionControls']", "[class*='BetsPanel']"]),
+    ]
+    for label, selectors in probes:
+        await _probe(page, label_prefix + label, selectors)
+
+
+async def _dump_raise_html(page):
+    """尝试打印 Raise 控件区域的完整 HTML"""
+    print("\n� 尝试输出 Raise 控件完整 HTML...")
+    candidates = [
+        "input[type='range']",
+        "input[type='number']",
+        "[class*='BetControls']",
+        "[class*='ActionControls']",
+        "[class*='RaiseControls']",
+    ]
+    for sel in candidates:
+        try:
+            el = page.locator(sel).first
+            if await el.count() > 0:
+                # 获取其最近有意义的父容器
+                html_snippet = await el.evaluate("""el => {
+                    let p = el;
+                    for (let i = 0; i < 4; i++) {
+                        if (p.parentElement) p = p.parentElement;
+                    }
+                    return p.outerHTML.substring(0, 3000);
+                }""")
+                print(f"\n🔑 [{sel}] 父容器 outerHTML (截断至3000字符):\n{html_snippet}")
+        except Exception as e:
+            pass
+
+
 async def _probe(page, label: str, selectors: list[str]):
-    """尝试多个选择器，打印每个找到的元素的基本信息。"""
     print(f"\n--- {label} ---")
     found_any = False
     for sel in selectors:
@@ -136,22 +213,30 @@ async def _probe(page, label: str, selectors: list[str]):
             if elements:
                 found_any = True
                 print(f"  [{sel}]  找到 {len(elements)} 个")
-                # 打印前 3 个的文本和 class，用于定位参考
                 for i, el in enumerate(elements[:3]):
                     try:
-                        text  = (await el.inner_text()).strip()[:60]
-                        cls   = await el.get_attribute("class") or ""
-                        cls   = cls[:80]
-                        print(f"    [{i}] text={repr(text)}  class={repr(cls)}")
+                        text    = (await el.inner_text()).strip()[:60]
+                        cls     = (await el.get_attribute("class") or "")[:80]
+                        el_type = await el.get_attribute("type") or ""
+                        el_min  = await el.get_attribute("min") or ""
+                        el_max  = await el.get_attribute("max") or ""
+                        el_val  = await el.get_attribute("value") or ""
+                        extra = ""
+                        if el_type: extra += f" type={repr(el_type)}"
+                        if el_min or el_max: extra += f" min={el_min} max={el_max} val={el_val}"
+                        print(f"    [{i}] text={repr(text)}  class={repr(cls)}{extra}")
                     except Exception:
                         print(f"    [{i}] (无法读取属性)")
         except Exception as e:
             print(f"  [{sel}]  查询失败: {e}")
-
     if not found_any:
-        print("  (未找到任何元素，请检查选择器或页面状态)")
+        print("  (未找到任何元素)")
 
 
 if __name__ == "__main__":
-    url_arg = sys.argv[1] if len(sys.argv) > 1 else None
-    asyncio.run(explore(url_arg))
+    args = sys.argv[1:]
+    manual_mode = "--manual" in args
+    if manual_mode:
+        args.remove("--manual")
+    url_arg = args[0] if args else None
+    asyncio.run(explore(url_arg, manual=manual_mode))

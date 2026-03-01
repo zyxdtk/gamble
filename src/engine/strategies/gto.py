@@ -197,6 +197,9 @@ class GTOBrain(Brain):
             num_opponents
         )
         self._last_equity = equity
+        
+        # 保存牌力信息到 state，供剥削策略使用
+        state.hand_strength = self.equity_calc.get_hand_strength(state.hole_cards, state.community_cards)
 
         call_amount = state.to_call
         pot = state.pot
@@ -217,34 +220,88 @@ class GTOBrain(Brain):
         elif is_against_maniac:
             call_threshold -= 0.05  # 对 Maniac 更松（抓诈唬）
 
-        # 超强牌：大额价值下注
+        # ── EV 计算 ──────────────────────────────────────────────────────────────
+        # 估算对手弃牌率（Fold Equity）
+        avg_vpip = 0.0
+        active_opps = [p for p in opponents if p.seat_id != state.my_seat_id]
+        if active_opps:
+            avg_vpip = sum(p.vpip for p in active_opps) / len(active_opps)
+        
+        street = "preflop" if not state.community_cards else (
+            "flop" if len(state.community_cards) <= 3 else
+            "turn" if len(state.community_cards) == 4 else "river"
+        )
+        fold_equity = self.equity_calc.estimate_fold_equity(avg_vpip, 0.0, street)
+        
+        # 计划加注金额（先用底池的 0.75 倍估算）
+        planned_raise = int(pot * 0.75) if pot > 0 else state.min_raise
+        ev_result = self.equity_calc.calculate_ev(
+            equity=equity, pot=pot, to_call=call_amount,
+            raise_amount=planned_raise, fold_equity=fold_equity
+        )
+        
+        print(f"[GTO EV] equity={equity:.2f}, fold_eq={fold_equity:.2f} | "
+              f"FOLD:{ev_result['fold_ev']} CALL:{ev_result['call_ev']} "
+              f"RAISE:{ev_result['raise_ev']} → best={ev_result['best_action']}({ev_result['best_ev']})",
+              flush=True)
+        
+        # ── 用 EV 最大化求最优加注尺度 ─────────────────────────────────────────
+        opt_raise = self.equity_calc.find_optimal_raise_size(
+            equity=equity, pot=pot if pot > 0 else 1,
+            to_call=call_amount,
+            min_raise=state.min_raise if state.min_raise > 0 else 2,
+            stack=state.total_chips if state.total_chips > 0 else 999,
+            base_fold_equity=fold_equity,
+        )
+        optimal_amount = opt_raise["optimal_amount"]
+        optimal_hint   = opt_raise["bet_size_hint"]
+        print(f"[GTO RAISE OPT] 最优尺度: {optimal_hint} = {optimal_amount} chips "
+              f"(EV:{opt_raise['optimal_ev']}) | 各档: {opt_raise['ev_by_size']}", flush=True)
+        # ─────────────────────────────────────────────────────────────────────────
+
+        # 超强牌：大额价值下注 → 底池注
         if equity > 0.70:
             base_amount = int(pot * 0.75)
             adjusted_amount = self._adjust_raise_amount(base_amount, state, equity, 
                                                         is_against_nit, is_against_maniac, 
                                                         is_against_station, num_opponents)
+            # 组合：EV 最优尺度 vs 固定乘数，取较大值（强牌要压榨）
+            final_amount = max(adjusted_amount, optimal_amount)
             return ActionPlan(
                 primary_action=ActionType.RAISE,
-                primary_amount=get_randomized_amount(adjusted_amount),
-                reasoning=f"超强牌 ({hand_str}) Equity: {equity:.1%}"
+                primary_amount=get_randomized_amount(final_amount),
+                bet_size_hint=optimal_hint,
+                reasoning=f"超强牌 ({hand_str}) Equity:{equity:.1%} OptHint:{optimal_hint}"
             )
 
-        # 强牌：标准价值下注
+        # 强牌：标准价值下注 → 半池注
         if equity > raise_threshold + 0.10:
             base_amount = int(pot * 0.66)
             adjusted_amount = self._adjust_raise_amount(base_amount, state, equity, 
                                                         is_against_nit, is_against_maniac, 
                                                         is_against_station, num_opponents)
+            # 强牌用 EV 最优尺度
+            final_amount = optimal_amount if opt_raise["optimal_ev"] > 0 else adjusted_amount
             return ActionPlan(
                 primary_action=ActionType.RAISE,
-                primary_amount=get_randomized_amount(adjusted_amount),
+                primary_amount=get_randomized_amount(final_amount),
                 call_range_min=0,
-                call_range_max=int(pot * 0.3),  # 收紧跟注范围
-                reasoning=f"强牌 ({hand_str}) Equity: {equity:.1%}"
+                call_range_max=int(pot * 0.3),
+                bet_size_hint=optimal_hint,
+                reasoning=f"强牌 ({hand_str}) Equity:{equity:.1%} OptHint:{optimal_hint}"
             )
 
-        # 中等牌：收紧跟注条件
-        if equity > call_threshold:
+        # 中等牌：用 EV 驱动决策（核心改进）
+        if equity > call_threshold or ev_result["call_ev"] > 0:
+            # 特殊情况：EV 为负，直接弃牌（即使胜率勉强够）
+            if ev_result["call_ev"] <= 0 and equity < call_threshold + 0.05:
+                return ActionPlan(
+                    primary_action=ActionType.CHECK,
+                    fallback_action=ActionType.FOLD,
+                    fold_threshold=int(pot * 0.15),
+                    reasoning=f"EV为负弃牌 ({hand_str}) EV:{ev_result['call_ev']}"
+                )
+
             # 对抗跟注站且胜率低：直接弃牌
             if is_against_station and equity < 0.40:
                 return ActionPlan(

@@ -55,7 +55,8 @@ class EngineManager:
                     )
                     for attr_name in dir(module):
                         attr = getattr(module, attr_name)
-                        if (isinstance(attr, type) and issubclass(attr, Brain) and attr is not Brain):
+                        if (isinstance(attr, type) and issubclass(attr, Brain) and 
+                            attr is not Brain and getattr(attr, "__module__", "") == module.__name__):
                             strategy_key = module_name.lower().replace("_", "")
                             self._strategy_registry[strategy_key] = attr
                 except Exception:

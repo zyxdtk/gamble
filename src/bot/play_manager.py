@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import re
 from ..core.utils import human_delay
 from ..engine.engine_manager import EngineManager
@@ -183,21 +184,111 @@ class PlayManager:
             pass
         return buttons
 
-    async def perform_click(self, action_text: str):
+    async def perform_click(self, action_text: str, amount: int = 0, bet_size_hint: str | None = None):
         buttons = await self.find_action_buttons()
         actions_to_try = [a.strip().lower() for a in action_text.split("/")]
         await human_delay()
         
         for choice in actions_to_try:
             target = None
+            is_raise = False
             if choice == "fold": 
                 target = buttons.get("fold")
             elif choice in ["check", "call"]: 
                 target = buttons.get("check") or buttons.get("call")
-            elif choice in ["raise", "bet", "all-in"]: 
+            elif choice in ["raise", "bet", "all-in", "all_in"]:
                 target = buttons.get("bet") or buttons.get("raise") or buttons.get("all in")
+                is_raise = True
             
             if target:
                 await target.click()
+                # 点击 Raise/Bet 后，尝试设置加注金额
+                if is_raise:
+                    await asyncio.sleep(0.4)
+                    await self.set_raise_amount(amount=amount, bet_size_hint=bet_size_hint, pot=self.tm.state.pot)
                 return True
+        return False
+
+    async def set_raise_amount(self, amount: int = 0, bet_size_hint: str | None = None, pot: int = 0):
+        """点击 Raise/Bet 后，通过快捷按钮或 input 设置加注金额。
+        
+        优先级：
+          1. 直接用 bet_size_hint 点对应快捷按钮（MIN/½POT/POT/MAX）
+          2. 按 amount/pot 比例自动映射到最近快捷按钮
+          3. 直接输入到 input 框（兜底）
+        """
+        page = self.tm.page
+        await asyncio.sleep(0.4)
+        
+        # ── 快捷按钮映射 ──────────────────────────────────────────────────────────
+        # 截图中按钮文本大致为："MIN" / "½ POT" / "POT" / "MAX"
+        PRESET_BUTTONS = {
+            "min":      ["MIN", "Min", "min"],
+            "half_pot": ["½ POT", "1/2 POT", "1/2", "Half", "HALF"],
+            "pot":      ["POT", "Pot"],
+            "max":      ["MAX", "Max", "All In", "ALL IN"],
+        }
+        
+        # 1. 如果没有 hint，根据 amount/pot 比例自动推断
+        if bet_size_hint is None and pot > 0 and amount > 0:
+            ratio = amount / pot
+            if ratio > 1.5:
+                bet_size_hint = "max"
+            elif ratio > 0.75:
+                bet_size_hint = "pot"
+            elif ratio > 0.4:
+                bet_size_hint = "half_pot"
+            else:
+                bet_size_hint = "min"
+            print(f"[ACTION] 自动推断加注档位: {bet_size_hint} (amount={amount}, pot={pot}, ratio={ratio:.2f})", flush=True)
+        
+        # 2. 尝试点击对应的快捷按钮
+        if bet_size_hint and bet_size_hint in PRESET_BUTTONS:
+            candidates = PRESET_BUTTONS[bet_size_hint]
+            for label in candidates:
+                try:
+                    # 同时尝试 button 和普通 div/span 点击
+                    for selector in [
+                        f"button:has-text('{label}')",
+                        f"[role='button']:has-text('{label}')",
+                        f"*:has-text('{label}')",
+                    ]:
+                        el = page.locator(selector).first
+                        if await el.count() > 0 and await el.is_visible():
+                            await el.click()
+                            print(f"[ACTION] ✅ 点击快捷按钮 [{label}] 设置加注尺度 ({bet_size_hint})", flush=True)
+                            return True
+                except Exception:
+                    continue
+            print(f"[ACTION] ⚠️ 未找到快捷按钮 ({bet_size_hint})，降级为 input 输入", flush=True)
+        
+        # 3. 兜底：直接往 input 框填数字
+        if amount <= 0:
+            return False
+        
+        number_selectors = [
+            "input.m-bet-input__input",
+            ".m-bet-input input",
+            ".m-bet-controls input",
+            "input[type='number']",
+            "input[type='text'][pattern='[0-9]*']",
+            "input[class*='Amount']",
+            "input[class*='Bet']",
+            "input[class*='input']",
+        ]
+        for sel in number_selectors:
+            try:
+                el = page.locator(sel).first
+                if await el.count() > 0 and await el.is_visible():
+                    await el.click(click_count=3)
+                    await page.keyboard.press("Control+a")
+                    await el.fill(str(amount))
+                    await asyncio.sleep(0.2)
+                    await el.press("Enter")
+                    print(f"[ACTION] ✅ input 兜底设置金额: {amount} (selector: {sel})", flush=True)
+                    return True
+            except Exception:
+                continue
+        
+        print(f"[ACTION] ⚠️ 未找到任何金额控件，使用默认最小加注 (期望: {amount})", flush=True)
         return False

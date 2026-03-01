@@ -36,14 +36,17 @@ class LifecycleManager:
                             print(f"[TABLE] Already seated at table with {self.tm.state.total_chips} chips.", flush=True)
                         return True
                     else:
-                        # 有座位但没有筹码，需要买入
-                        print("[TABLE] Seated but no chips, need to buy in...", flush=True)
+                        # 有座位但没有筹码，可能正在等待处理或需要点击对话框
+                        print("[TABLE] Seated but no chips, checking for buy-in dialog...", flush=True)
                         if await self._confirm_buyin_dialog():
                             self.tm.is_sitting = True
-                            # 设置初始筹码（用于统计）
-                            if self.tm.initial_chips is None and self.tm.state.total_chips:
-                                self.tm.initial_chips = self.tm.state.total_chips
-                            print("[TABLE] Buy-in confirmed.", flush=True)
+                            print("[TABLE] Buy-in confirmed via dialog.", flush=True)
+                            return True
+                        else:
+                            # 没发现对话框，可能只是数据更新延迟，或者刚坐下还没发筹码
+                            # 返回 True 让上层逻辑降级处理（例如观战或等待），而不是不断尝试找新座位
+                            print("[TABLE] Seated but no chips and no dialog. Waiting for game update...", flush=True)
+                            await asyncio.sleep(2)
                             return True
                     
                 if await self._confirm_buyin_dialog():
@@ -182,51 +185,88 @@ class LifecycleManager:
     async def _find_my_seat(self):
         """查找自己的座位元素和座位ID。使用WebSocket中捕获的my_seat_id。"""
         try:
-            # 优先使用WebSocket中捕获的座位ID
+            # 优先使用记录的座位ID
             if self.tm.state.my_seat_id is not None:
                 seat_id = self.tm.state.my_seat_id
                 # 根据座位ID查找对应的座位元素
-                seat_selector = f".Seat--{seat_id}, [data-seat-id='{seat_id}']"
-                seat_elem = self.tm.page.locator(seat_selector).first
-                if await seat_elem.count() > 0:
-                    print(f"[LIFECYCLE] Found seat element by ID: {seat_id}", flush=True)
-                    return seat_elem, seat_id
-                # 如果找不到特定选择器，尝试查找所有座位
-                all_seats = await self.tm.page.locator(".Seat").all()
-                for seat in all_seats:
-                    try:
-                        seat_class = await seat.get_attribute("class")
-                        import re
-                        match = re.search(r'Seat--(\d+)', seat_class or "")
-                        if match and int(match.group(1)) == seat_id:
-                            print(f"[LIFECYCLE] Found seat element by class: {seat_id}", flush=True)
-                            return seat, seat_id
-                    except Exception:
-                        continue
+                # 尝试多种可能的 CSS 类名
+                seat_selectors = [
+                    f".Seat--{seat_id}",
+                    f"[data-seat-id='{seat_id}']",
+                    f".Position--{seat_id}",
+                    f".seat-{seat_id}"
+                ]
+                for sel in seat_selectors:
+                    seat_elem = self.tm.page.locator(sel).first
+                    if await seat_elem.count() > 0:
+                        # print(f"[LIFECYCLE] Found seat element by selector: {sel}", flush=True)
+                        return seat_elem, seat_id
 
-            # 回退方案：尝试通过username查找（如果配置了）
+            # 回退方案：通过 DOM 查找用户名
             username = self.tm.settings.get("player", {}).get("username", "").strip()
             if username:
-                seat_users = self.tm.page.locator(".Seat__username")
-                count = await seat_users.count()
-                for i in range(count):
-                    el = seat_users.nth(i)
-                    text = await el.text_content()
-                    if text and username.lower() in text.lower():
-                        seat_elem = el.locator("xpath=ancestor::div[contains(@class, 'Seat')][1]")
-                        try:
-                            seat_class = await seat_elem.get_attribute("class")
-                            import re
-                            match = re.search(r'Seat--(\d+)', seat_class or "")
-                            if match:
-                                seat_id = int(match.group(1))
-                                self.tm.state.my_seat_id = seat_id
-                                print(f"[LIFECYCLE] Found seat by username: {seat_id}", flush=True)
-                                return seat_elem, seat_id
-                        except Exception:
-                            pass
+                # 尝试多种可能的选择器
+                selectors = [".Seat__username", ".seat-username", "[class*='Username']", ".username"]
+                all_found_users = []
+                
+                for sel in selectors:
+                    nodes = self.tm.page.locator(sel)
+                    count = await nodes.count()
+                    for i in range(count):
+                        text = (await nodes.nth(i).text_content() or "").strip()
+                        if text:
+                            all_found_users.append(text)
+                            if username.lower() in text.lower():
+                                # 寻找主座位容器：包含 'Seat' 但不是子组件（不含 '__'）且包含 '--' 的 div
+                                seat_elem = nodes.nth(i).locator("xpath=ancestor::div[contains(@class, 'Seat') and contains(@class, '--') and not(contains(@class, 'Seat__'))][1]")
+                                if await seat_elem.count() == 0:
+                                    # 回退：寻找任何包含 '--' 的 Seat 祖先
+                                    seat_elem = nodes.nth(i).locator("xpath=ancestor::div[contains(@class, 'Seat') and contains(@class, '--')][1]")
+                                
+                                try:
+                                    # 深度搜索祖先节点以获取 ID
+                                    seat_id = None
+                                    
+                                    for depth in range(1, 6):
+                                        ancestor = nodes.nth(i).locator(f"xpath=ancestor::*[{depth}]")
+                                        if await ancestor.count() == 0: break
+                                        
+                                        cls = await ancestor.get_attribute("class") or ""
+                                        sid_attr = await ancestor.get_attribute("data-seat-id")
+                                        
+                                        if sid_attr and sid_attr.isdigit():
+                                            seat_id = int(sid_attr)
+                                        else:
+                                            m = re.search(r'(?:Seat|Position)--?(\d+)', cls)
+                                            if m: seat_id = int(m.group(1))
+                                            
+                                        if seat_id is not None:
+                                            self.tm.state.my_seat_id = seat_id
+                                            print(f"[LIFECYCLE] ✅ Found my seat: ID={seat_id} (found at ancestor {depth})", flush=True)
+                                            
+                                            # 顺便尝试从 DOM 提取当前筹码量
+                                            stack_elem = ancestor.locator(".Seat__stack, .seat-stack, [class*='stack']").first
+                                            if await stack_elem.count() > 0:
+                                                try:
+                                                    text_s = await stack_elem.text_content()
+                                                    m_s = re.search(r'([\d,]+)', text_s)
+                                                    if m_s:
+                                                        self.tm.state.total_chips = int(m_s.group(1).replace(',', ''))
+                                                        print(f"[LIFECYCLE] Initial chips from DOM: {self.tm.state.total_chips}", flush=True)
+                                                except Exception: pass
+                                            return ancestor, seat_id
 
-            print(f"[LIFECYCLE] Could not find my seat (my_seat_id={self.tm.state.my_seat_id})", flush=True)
+                                    print(f"[LIFECYCLE] ❌ Found username '{text}' but no ID-bearing ancestor.", flush=True)
+                                except Exception as e:
+                                    print(f"[LIFECYCLE] Error parsing seat: {e}", flush=True)
+
+                                except Exception as e:
+                                    print(f"[LIFECYCLE] Error parsing seat element after finding username: {e}", flush=True)
+
+                if all_found_users:
+                    print(f"[LIFECYCLE] Usernames found at table: {all_found_users}", flush=True)
+
+            print(f"[LIFECYCLE] ❌ Could not find my seat (Username targeting: '{username}', current my_seat_id={self.tm.state.my_seat_id})", flush=True)
         except Exception as e:
             print(f"[LIFECYCLE] Error finding my seat: {e}", flush=True)
         return None, None
@@ -253,62 +293,47 @@ class LifecycleManager:
             "current_chips": self.tm.state.total_chips or 0,
         }
         
-        if self.tm.initial_chips is None:
-            return status
+        # 获取当前大盲注 (BB)
+        bb = self.tm.big_blind or 2
         
-        # 检查桌子满了
-        if self._table_full:
-            status["should_exit"] = True
-            status["reason"] = "table_full"
-            return status
-        
-        # 计算盈亏 - 使用检测到的big_blind或配置的默认值
-        if self.tm.big_blind > 0:
-            bb = self.tm.big_blind
-        else:
-            # 从配置读取默认stakes
-            try:
-                import yaml
-                with open("config/settings.yaml", 'r') as f:
-                    config = yaml.safe_load(f)
-                    stakes_str = config.get("game", {}).get("preferred_stakes", "1/2")
-                    parts = stakes_str.split("/")
-                    if len(parts) >= 2:
-                        bb = int(parts[1])
-                    else:
-                        bb = 2  # 默认2
-            except Exception:
-                bb = 2  # 默认2
-
         stop_loss = bb * self.tm.stop_loss_bb
         take_profit = bb * self.tm.take_profit_bb
         low_chips = bb * self.tm.low_chips_bb
         max_chips = bb * self.tm.max_chips_bb
 
         current = self.tm.state.total_chips or 0
-        profit = current - self.tm.initial_chips
-        status["profit"] = profit
+        status["current_chips"] = current
 
-        if profit <= -stop_loss:
-            status["stop_loss_triggered"] = True
-            status["should_exit"] = True
-            status["reason"] = f"stop_loss: {profit}"
+        # 盈亏相关逻辑需要 initial_chips
+        if self.tm.initial_chips is not None:
+            profit = current - self.tm.initial_chips
+            status["profit"] = profit
 
-        if profit >= take_profit:
-            status["take_profit_triggered"] = True
-            status["should_exit"] = True
-            status["reason"] = f"take_profit: +{profit}"
+            if profit <= -stop_loss:
+                status["stop_loss_triggered"] = True
+                status["should_exit"] = True
+                status["reason"] = f"stop_loss: {profit}"
 
-        if current < low_chips and self.tm.is_sitting:
+            if profit >= take_profit:
+                status["take_profit_triggered"] = True
+                status["should_exit"] = True
+                status["reason"] = f"take_profit: +{profit}"
+
+        # 绝对筹码量限制（支持初始超标检测）
+        # 只要识别到了筹码量，并且筹码量超过了上限，就应该准备离桌
+        if current > max_chips and max_chips > 0:
+            # 只有当这是我们自己的筹码（已确定座位）或者是正在尝试坐下时才触发
+            if self.tm.state.my_seat_id is not None or self.tm.is_sitting:
+                status["max_chips"] = True
+                status["should_exit"] = True
+                status["reason"] = f"max_chips: {current} (limit: {max_chips})"
+                print(f"[LIFECYCLE] ⚠️ 初始或当前筹码 ({current}) 已超过上限 ({max_chips})，准备离桌。", flush=True)
+
+        # 筹码不足限制（仍保留 is_sitting 检查，防止在观察位时误判）
+        if self.tm.is_sitting and current < low_chips and low_chips > 0:
             status["low_chips"] = True
             status["should_exit"] = True
             status["reason"] = f"low_chips: {current}"
-
-        # 检查筹码上限（当前筹码超过指定BB量）
-        if current > max_chips and self.tm.is_sitting:
-            status["max_chips"] = True
-            status["should_exit"] = True
-            status["reason"] = f"max_chips: {current} (>{max_chips})"
         
         # 检查其他活跃玩家
         other_active_players = [

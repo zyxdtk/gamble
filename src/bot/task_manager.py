@@ -117,16 +117,16 @@ class TaskManager:
         print(f"[TASK] Type: {self.config.task_type.value}, Target: {self.config.target_value}")
         print(f"[TASK] Strategy: {self.config.strategy}")
         
+        # 尽早设置策略环境变量
+        import os
+        os.environ["POKER_STRATEGY"] = self.config.strategy
+        
         # 创建并启动 BrowserManager
         self.browser_mgr = BrowserManager(
             headless=headless,
             auto_mode=True,
             apprentice_mode=False
         )
-        
-        # 设置策略
-        import os
-        os.environ["POKER_STRATEGY"] = self.config.strategy
         
         await self.browser_mgr.start()
         

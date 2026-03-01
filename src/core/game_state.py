@@ -12,6 +12,7 @@ class Player:
     last_action: Optional[str] = None
     street_actions: List[str] = field(default_factory=list)
     perceived_range: str = "Unknown" # e.g. "Tight", "Wide", "Capped"
+    bet: int = 0  # 当前下注金额（用于行动线分析）
     
     # Statistics for profiling
     hands_played: int = 0
@@ -41,6 +42,7 @@ class GameState:
     players: Dict[int, Player] = field(default_factory=dict)
     my_initial_chips: int = 0
     total_chips: int = 0 # Current account balance (on-table + bank)
+    hand_strength: Dict = field(default_factory=dict)
     
     @property
     def is_my_turn(self) -> bool:

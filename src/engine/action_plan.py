@@ -29,6 +29,9 @@ class ActionPlan:
     
     confidence: float = 0.5
     reasoning: str = ""
+    # 加注尺度提示：策略层向 PlayManager 指示目标加注档位
+    # 可选值: "min" | "half_pot" | "pot" | "max" | None (表示使用 primary_amount 精确值)
+    bet_size_hint: str | None = None
     
     def get_action_for_bet(self, to_call: int, pot: int) -> tuple[ActionType, int]:
         if to_call == 0:

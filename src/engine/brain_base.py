@@ -45,7 +45,11 @@ class Brain(ABC):
 
             # 如果 deep_think 失败或返回 None，使用默认计划
             if self.current_plan is None:
-                self.current_plan = self.create_initial_plan(state)
+                try:
+                    self.current_plan = self.create_initial_plan(state)
+                except Exception as e2:
+                    print(f"[BRAIN ERROR] {self.strategy_name} fallback create_initial_plan error: {e2}", flush=True)
+                    self.current_plan = ActionPlan(primary_action=ActionType.FOLD, reasoning="Critical Brain Failure - Folding")
 
             to_call = state.to_call
             pot = state.pot
@@ -58,7 +62,7 @@ class Brain(ABC):
             return {
                 "decision": {
                     "action": action.value,
-                    "amount": amount
+                    "amount": int(amount)  # 确保金额为整数
                 },
                 "strategy_name": self.strategy_name,
                 "is_passive": False,
@@ -66,7 +70,8 @@ class Brain(ABC):
                 "plan": self.current_plan.to_dict(),
                 "my_equity": my_equity,
                 "pot_odds": pot_odds,
-                "my_hand_strength": self.current_plan.reasoning
+                "my_hand_strength": self.current_plan.reasoning,
+                "bet_size_hint": getattr(self.current_plan, "bet_size_hint", None),
             }
 
     def reset(self) -> None:

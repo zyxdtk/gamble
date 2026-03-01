@@ -168,19 +168,29 @@ class BrowserManager:
         """保存已关闭桌子的统计信息到累计统计中。"""
         self._accumulated_stats["total_hands"] += manager.hands_played
         self._accumulated_stats["total_cycles"] += manager.dealer_cycle_count
-        self._accumulated_stats["total_buyin"] += manager.total_buyin
         
-        # 计算盈亏
-        if manager.initial_chips and manager.state.total_chips:
-            profit = manager.state.total_chips - manager.initial_chips
+        # 确保买入被记录
+        buyin = manager.total_buyin or manager.initial_chips or 0
+        self._accumulated_stats["total_buyin"] += buyin
+        
+        # 计算盈亏：最终筹码 - 起始筹码 (或买入)
+        current_chips = manager.state.total_chips or 0
+        start_chips = manager.initial_chips or buyin
+        
+        profit = 0
+        if start_chips > 0:
+            profit = current_chips - start_chips
             self._accumulated_stats["total_profit"] += profit
         
         self._accumulated_stats["tables_completed"] += 1
         
         print(
-            f"[MANAGER] Accumulated stats from closed table: "
-            f"hands={manager.hands_played}, cycles={manager.dealer_cycle_count}, "
-            f"buyin={manager.total_buyin}, profit={self._accumulated_stats['total_profit']}",
+            f"[MANAGER] 🏁 Table Closed Statistics:\n"
+            f"   - Table ID: {manager._extract_table_id(manager.page.url) if hasattr(manager, '_extract_table_id') else 'unknown'}\n"
+            f"   - Hands: {manager.hands_played}, Cycles: {manager.dealer_cycle_count}\n"
+            f"   - Buy-in: {buyin}, Final Chips: {current_chips}\n"
+            f"   - This Table Profit: {profit:+d}\n"
+            f"   - Total Accumulated Profit: {self._accumulated_stats['total_profit']:+d}",
             flush=True
         )
 

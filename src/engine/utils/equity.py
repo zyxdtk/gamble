@@ -71,6 +71,175 @@ class EquityCalculator:
         except Exception:
             return self._estimate_preflop_equity(hole_cards)
     
+    def calculate_ev(self, equity: float, pot: int, to_call: int,
+                     raise_amount: int = 0, fold_equity: float = 0.0) -> dict:
+        """计算三种主要行动的期望值（EV）。
+        
+        Args:
+            equity:       我方胜率（蒙特卡洛模拟结果）
+            pot:          当前底池
+            to_call:      需要跟注的金额
+            raise_amount: 计划加注的额外筹码
+            fold_equity:  对手因我们加注而弃牌的估计概率（0~1）
+        
+        Returns:
+            dict: fold_ev, call_ev, raise_ev, best_action, best_ev
+        """
+        # 1. FOLD EV：永远是 0（放弃底池，不失去更多）
+        fold_ev = 0.0
+        
+        # 2. CALL EV = equity × 赢得总底池 - 跟注费用
+        call_ev = 0.0
+        if to_call > 0:
+            total_pot_if_call = pot + to_call
+            call_ev = equity * total_pot_if_call - to_call
+        else:
+            # 无需跟注（check 场景），EV = equity × 当前底池
+            call_ev = equity * pot
+        
+        # 3. RAISE EV = 弃牌权益 × 当前底池赢得 + 跟注后的胜率 EV
+        raise_ev = 0.0
+        if raise_amount > 0:
+            total_pot_if_raise = pot + to_call + raise_amount + raise_amount  # 双方各加
+            showdown_ev = equity * total_pot_if_raise - (to_call + raise_amount)
+            immediate_win = pot  # 对手弃牌时立刻赢得当前底池
+            raise_ev = fold_equity * immediate_win + (1 - fold_equity) * showdown_ev
+        
+        # 4. 推荐最优行动
+        evs = {"FOLD": fold_ev, "CALL": call_ev}
+        if raise_amount > 0:
+            evs["RAISE"] = raise_ev
+        
+        best_action = max(evs, key=lambda k: evs[k])
+        best_ev = evs[best_action]
+        
+        return {
+            "fold_ev": round(fold_ev, 2),
+            "call_ev": round(call_ev, 2),
+            "raise_ev": round(raise_ev, 2) if raise_amount > 0 else None,
+            "best_action": best_action,
+            "best_ev": round(best_ev, 2),
+        }
+
+    def estimate_fold_equity(self, opp_vpip: float, opp_pfr: float, street: str) -> float:
+        """粗估对手在面对我们加注时的弃牌概率（Fold Equity）。
+        
+        VPIP 越高（越松）→ 弃牌率越高
+        街道越靠后（Turn/River）→ 对手已经投入更多，弃牌率越低
+        """
+        if opp_vpip <= 0:
+            return 0.40  # 无统计数据时给默认中性估计
+        base_fold_rate = min(0.75, max(0.10, (opp_vpip - 10) / 80))
+        street_factor = {"preflop": 1.0, "flop": 0.85, "turn": 0.70, "river": 0.50}
+        factor = street_factor.get(street.lower(), 0.75)
+        return round(base_fold_rate * factor, 2)
+
+    def find_optimal_raise_size(
+        self, equity: float, pot: int, to_call: int,
+        min_raise: int, stack: int,
+        base_fold_equity: float = 0.40
+    ) -> dict:
+        """通过 EV 最大化找到最优加注尺度。
+        
+        加注越大：
+         - 赢得底池越多（若摊牌）
+         - 对手弃牌概率越高（弃牌权益增加）
+         - 自身成本越高
+        
+        Args:
+            equity:           我方摊牌胜率
+            pot:              当前底池
+            to_call:          需要跟注金额
+            min_raise:        场上最小加注额
+            stack:            我方剩余筹码（上限 = all-in）
+            base_fold_equity: 基础弃牌率（来自 estimate_fold_equity）
+        
+        Returns:
+            dict:
+              optimal_amount:  EV 最大的加注金额
+              optimal_ev:      对应的 EV
+              bet_size_hint:   建议快捷按钮 (min/half_pot/pot/max)
+              ev_by_size:      各档位的 EV 对比
+        """
+        if pot <= 0 or min_raise <= 0 or stack <= 0:
+            return {
+                "optimal_amount": min_raise or pot,
+                "optimal_ev": 0.0,
+                "bet_size_hint": "half_pot",
+                "ev_by_size": {}
+            }
+        
+        # 构造候选档位：MIN / ½POT / POT / 2×POT / ALL-IN
+        candidates = {
+            "min":      max(min_raise, 1),
+            "half_pot": max(min_raise, int(pot * 0.5)),
+            "pot":      max(min_raise, pot),
+            "max":      stack,
+        }
+        # 过滤超出 stack 的
+        candidates = {k: min(v, stack) for k, v in candidates.items()}
+        # 去重
+        seen = set()
+        unique_candidates = {}
+        for k, v in candidates.items():
+            if v not in seen:
+                seen.add(v)
+                unique_candidates[k] = v
+        
+        def raise_ev_at(r: int) -> float:
+            """计算加注 r 时的 EV。随加注增大，弃牌率也动态增加。"""
+            if r <= 0:
+                return 0.0
+            # 下注尺度比（bet / pot），用于动态调整弃牌率
+            bet_ratio = r / pot if pot > 0 else 1.0
+            # 加注越大，对手弃牌概率越高，但有上限（75%）
+            dynamic_fold_eq = min(0.75, base_fold_equity * (1 + bet_ratio * 0.5))
+            
+            total_pot = pot + to_call + r + r  # 双方各投
+            showdown_ev = equity * total_pot - (to_call + r)
+            immediate_win = pot
+            ev = dynamic_fold_eq * immediate_win + (1 - dynamic_fold_eq) * showdown_ev
+            return round(ev, 2)
+        
+        ev_by_size = {k: raise_ev_at(v) for k, v in unique_candidates.items()}
+        
+        # 找到 EV 最大的档位
+        best_hint = max(ev_by_size, key=lambda k: ev_by_size[k])
+        best_amount = unique_candidates[best_hint]
+        best_ev = ev_by_size[best_hint]
+        
+        return {
+            "optimal_amount": best_amount,
+            "optimal_ev": best_ev,
+            "bet_size_hint": best_hint,
+            "ev_by_size": ev_by_size,
+        }
+
+    def get_hand_strength(self, hole_cards: list[str], community_cards: list[str]) -> dict:
+
+        """识别当前的牌型。"""
+        if not self.evaluator or not Card or not community_cards:
+            return {"combination": "none", "points": 0}
+            
+        try:
+            hero_cards = [self._to_treys(c) for c in hole_cards]
+            board_cards = [self._to_treys(c) for c in community_cards]
+            
+            if None in hero_cards or None in board_cards:
+                return {"combination": "none", "points": 0}
+            
+            # 使用 treys evaluator 获取得分和牌型类
+            score = self.evaluator.evaluate(hero_cards, board_cards)
+            hand_class = self.evaluator.get_rank_class(score)
+            class_str = self.evaluator.class_to_string(hand_class).lower().replace(" ", "_")
+            
+            return {
+                "combination": class_str,
+                "points": 8000 - score, # score 越小牌越强，转换成点数
+            }
+        except Exception:
+            return {"combination": "none", "points": 0}
+            
     def _to_treys(self, card_str: str):
         if len(card_str) == 2:
             return Card.new(f"{card_str[0].upper()}{card_str[1].lower()}")

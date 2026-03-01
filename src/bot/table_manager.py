@@ -143,8 +143,15 @@ class TableManager:
             if not action:
                 continue
 
-            # if action not in ["dealCommunityCards", "updatePots"]:
-            print(f"[WS] Action: {action}, keys: {list(update.keys())}, {update}", flush=True)
+            # 精简输出关键信息
+            essential = {k: v for k, v in update.items() if k not in ["time", "sequence", "action"]}
+            # 如果列表太长（如 players, seats），只保留长度信息或精简项
+            for k in ["players", "seats", "pots"]:
+                if k in essential and isinstance(essential[k], list):
+                    if len(essential[k]) > 3:
+                        essential[k] = f"[{len(essential[k])} items]"
+            
+            print(f"[WS] {action}: {essential}", flush=True)
             
             if "players" in update:
                 self._update_players_from_data(update.get("players", []))
@@ -159,25 +166,32 @@ class TableManager:
                     p_cards = p.get("cards")
                     seat = p.get("seat") or p.get("seatId")
                     user_id = p.get("userId")
-                    print(f"[WS] Player in dealHoleCards: seat={seat}, userId={user_id}, cards={p_cards}", flush=True)
+                    
                     if p_cards and len(p_cards) == 2:
+                        is_my_cards = False
+                        # 启发式识别：如果看到非 'X' 的底牌，那一定是我们的位置
+                        if "X" not in p_cards:
+                            is_my_cards = True
+                            if self.state.my_seat_id != seat:
+                                self.state.my_seat_id = seat
+                                self.my_user_id = user_id
+                                print(f"[WS] 🎯 Auto-detected identity from cards: seat={seat}, userId={user_id}", flush=True)
+                        elif self.my_user_id and str(user_id) == str(self.my_user_id):
+                            is_my_cards = True
+                            self.state.my_seat_id = seat
+                        elif seat == self.state.my_seat_id:
+                            is_my_cards = True
+
+                        if is_my_cards:
+                            self.state.hole_cards = p_cards
+                            self.is_sitting = True # 确认入座
+                            print(f"[WS] My Hole Cards: {p_cards}", flush=True)
+                        
                         if seat is not None:
                             if seat not in self.state.players:
                                 from ..core.game_state import Player
                                 self.state.players[seat] = Player(seat_id=seat)
                             self.state.players[seat].cards = p_cards
-                            # 使用userId匹配自己的座位
-                            is_my_cards = False
-                            if self.my_user_id and user_id == self.my_user_id:
-                                is_my_cards = True
-                                self.state.my_seat_id = seat
-                                print(f"[WS] Matched by userId: my_seat_id set to {seat}", flush=True)
-                            elif seat == self.state.my_seat_id:
-                                is_my_cards = True
-                            print(f"[WS] Checking seat match: seat={seat}, my_seat_id={self.state.my_seat_id}, is_my={is_my_cards}", flush=True)
-                            if is_my_cards:
-                                self.state.hole_cards = p_cards
-                                print(f"[WS] My Hole Cards (seat {seat}): {p_cards}", flush=True)
             elif action == "dealCommunityCards":
                 self.state.community_cards = update.get("cards", [])
                 print(f"[WS] Received Community Cards: {self.state.community_cards}", flush=True)
@@ -190,8 +204,11 @@ class TableManager:
             elif action == "startHand":
                 if "dealerSeat" in update:
                     self.state.current_dealer_seat = update.get("dealerSeat")
+            elif action == "blinds":
+                self.big_blind = update.get("minimumRaise", self.big_blind)
             elif action == "tick":
                 current_player = update.get("currentPlayer")
+                self.big_blind = update.get("minimumRaise", self.big_blind)
                 if current_player:
                     seat = current_player.get("seatId")
                     self.state.active_seat = seat
@@ -203,21 +220,14 @@ class TableManager:
                 for s, p in self.state.players.items():
                     p.is_acting = (s == seat)
             elif action == "seat":
-                # 捕获自己的userId
+                # 仅记录收到的座位信息，不再盲目假设是自己
                 seat_data = update.get("seat", {})
                 if seat_data.get("state") == "playing":
                     user_id = seat_data.get("userId")
                     seat_id = seat_data.get("id")
                     if user_id and seat_id is not None:
-                        # 如果还没有设置my_seat_id，尝试从DOM确认
-                        if self.state.my_seat_id is None:
-                            # 异步检查DOM中的座位（需要在外部调用时处理）
-                            # 这里先记录可能的userId和seatId
-                            print(f"[WS] Potential my seat: userId={user_id}, seat={seat_id}", flush=True)
-                            # 暂时假设这是自己的座位（后续可以通过DOM验证）
-                            self.my_user_id = user_id
-                            self.state.my_seat_id = seat_id
-                            print(f"[WS] Set my_seat_id to {seat_id}, userId={user_id}", flush=True)
+                        # 仅做记录，不直接设置为 my_seat_id
+                        print(f"[WS] Seat update detected: userId={user_id}, seat={seat_id}", flush=True)
 
         # 更新游戏状态到引擎（PlayManager 负责引擎交互）
         self.play_mgr.update_brain_state()
@@ -234,8 +244,15 @@ class TableManager:
 
             if "name" in p_data:
                 p.name = p_data["name"]
-            if "chips" in p_data:
-                p.chips = p_data["chips"]
+            if "chips" in p_data or "stack" in p_data:
+                p.chips = p_data.get("chips", p_data.get("stack", p.chips))
+                if seat == self.state.my_seat_id:
+                    self.state.total_chips = p.chips
+                    # 统计同步：初始化起始筹码和买入
+                    if self.initial_chips is None and p.chips > 0:
+                        self.initial_chips = p.chips
+                        self.total_buyin = p.chips
+                        print(f"[WS] Initialized stats: initial_chips={p.chips}, total_buyin={p.chips}", flush=True)
 
             raw_status = p_data.get("status") or p_data.get("state", "")
             if raw_status:
@@ -251,10 +268,20 @@ class TableManager:
 
             # 使用userId匹配自己的座位（如果已知）
             user_id = p_data.get("userId")
-            if self.my_user_id and user_id == self.my_user_id:
+            if self.my_user_id and str(user_id) == str(self.my_user_id):
                 if self.state.my_seat_id != seat:
                     self.state.my_seat_id = seat
+                    self.state.total_chips = p.chips
+                    # 同时在这里也做一次统计初始化检查
+                    if self.initial_chips is None and p.chips > 0:
+                        self.initial_chips = p.chips
+                        self.total_buyin = p.chips
+                        print(f"[WS] Initialized stats (userId match): initial_chips={p.chips}", flush=True)
                     print(f"[WS] Updated my_seat_id to {seat} (matched userId)", flush=True)
+            elif seat == self.state.my_seat_id:
+                if self.my_user_id is None and user_id:
+                    self.my_user_id = user_id
+                    print(f"[WS] Sync my_user_id to {user_id} from my_seat_id={seat}", flush=True)
 
     async def update_dealer_cycle(self):
         return await self.play_mgr._update_dealer_cycle()
@@ -328,6 +355,7 @@ class TableManager:
             is_passive = dummy_decision.get("is_passive", False)
 
             # TableManager 负责决定是否离开桌子
+            # 优先检查退出条件（即使还没入座，如果识别到筹码超标也要走）
             exit_status = self.lifecycle_mgr.get_exit_status()
             if not is_passive and self._should_leave_table(exit_status):
                 await self.lifecycle_mgr.leave_table()
@@ -364,20 +392,39 @@ class TableManager:
             # 输出策略思考日志（支持所有策略类型）
             turn_key = f"{strategy_name}-{self.state.hole_cards}-{self.state.community_cards}"
             if self._last_log_turn != turn_key:
-                hand = decision_data.get("my_hand_strength", "Unknown")
                 decision_info = decision_data.get("decision") or {}
                 action = decision_info.get("action", "WAIT")
+                amount = decision_info.get("amount", 0)
                 equity = decision_data.get('my_equity', 0)
+                hand = self.state.hole_cards if self.state.hole_cards else "Unknown"
+                plan_info = decision_data.get("my_action", "")
 
                 # 根据策略类型输出不同格式的日志
                 if strategy_name in ["GTO", "gto"]:
-                    print(f"[GTO THINKING] Hand: {hand}, Intent: {action}, Equity: {equity:.1f}%", flush=True)
+                    print(f"[GTO THINKING] Hand: {hand}, Action: {action}", end="")
+                    if amount > 0:
+                        print(f" (Amount: {amount})", end="")
+                    print(f", Equity: {equity * 100:.1f}%", flush=True)
+                    if plan_info:
+                        print(f"[GTO PLAN] {plan_info}", flush=True)
                 elif strategy_name in ["exploitative", "EXPLOITATIVE"]:
-                    print(f"[EXPLOITATIVE THINKING] Hand: {hand}, Intent: {action}, Equity: {equity:.1f}%", flush=True)
+                    print(f"[EXPLOITATIVE THINKING] Hand: {hand}, Action: {action}", end="")
+                    if amount > 0:
+                        print(f" (Amount: {amount})", end="")
+                    print(f", Equity: {equity * 100:.1f}%", flush=True)
+                    if plan_info:
+                        print(f"[EXPLOITATIVE PLAN] {plan_info}", flush=True)
                 elif strategy_name in ["checkorfold", "CHECKORFOLD", "check_or_fold"]:
-                    print(f"[CHECK/FOLD THINKING] Hand: {hand}, Intent: {action}", flush=True)
+                    print(f"[CHECK/FOLD THINKING] Hand: {hand}, Action: {action}", flush=True)
+                    if plan_info:
+                        print(f"[CHECK/FOLD PLAN] {plan_info}", flush=True)
                 else:
-                    print(f"[{strategy_name.upper()} THINKING] Hand: {hand}, Intent: {action}, Equity: {equity:.1f}%", flush=True)
+                    print(f"[{strategy_name.upper()} THINKING] Hand: {hand}, Action: {action}", end="")
+                    if amount > 0:
+                        print(f" (Amount: {amount})", end="")
+                    print(f", Equity: {equity * 100:.1f}%", flush=True)
+                    if plan_info:
+                        print(f"[{strategy_name.upper()} PLAN] {plan_info}", flush=True)
 
                 self._last_log_turn = turn_key
 
@@ -394,11 +441,12 @@ class TableManager:
             if decision_obj and isinstance(decision_obj, dict):
                 action = decision_obj.get("action", "")
                 amount = decision_obj.get("amount", 0)
+                bet_size_hint = decision_data.get("bet_size_hint") if isinstance(decision_data, dict) else None
                 
                 if action:
                     await self.hud.update_content(self.page, decision_data)
-                    print(f"[STRATEGY: {strategy_name}] Executing: {action} (Amount: {amount})", flush=True)
-                    await self.play_mgr.perform_click(action)
+                    print(f"[STRATEGY: {strategy_name}] Executing: {action} (Amount: {amount}, Hint: {bet_size_hint})", flush=True)
+                    await self.play_mgr.perform_click(action, amount=amount, bet_size_hint=bet_size_hint)
                     await asyncio.sleep(2)
         except Exception as e:
             import traceback
