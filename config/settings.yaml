@@ -31,3 +31,7 @@ game:
     take_profit_bb: 300   # 盈利超过 N 个 BB 时离桌
     low_chips_bb: -1      # 桌上筹码不足 N 个 BB 时离桌（短码预警）
     max_chips_bb: 800     # 桌上筹码超过 N 个 BB 时离桌（防止筹码过多）
+    
+auto_mode:
+  limits:
+    max_cycles: 10        # 单桌最大圈数限制

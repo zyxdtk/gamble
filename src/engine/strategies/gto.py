@@ -1,7 +1,8 @@
 from src.engine.brain_base import Brain
 from src.engine.action_plan import ActionPlan, ActionType
 from src.core.game_state import GameState
-from src.engine.utils import EquityCalculator, RangeManager, get_position_code, normalize_hand_string, get_player_tag
+from src.engine.utils import EquityCalculator, PreflopRangeManager, get_position_code, normalize_hand_string
+from src.engine.player_analysis import get_player_tag
 from src.core.utils import get_randomized_amount
 
 
@@ -11,7 +12,7 @@ class GTOBrain(Brain):
     def __init__(self, thinking_timeout: float = 2.0):
         super().__init__(thinking_timeout)
         self.equity_calc = EquityCalculator()
-        self.range_mgr = RangeManager()
+        self.range_mgr = PreflopRangeManager()
         self._last_equity = 0.0
         self._last_hand_str = ""
     
@@ -83,8 +84,7 @@ class GTOBrain(Brain):
             return ActionPlan(
                 primary_action=ActionType.RAISE,
                 primary_amount=get_randomized_amount(adjusted_amount),
-                call_range_min=0,
-                call_range_max=999999999,
+                limit_amount=999999,
                 reasoning=f"顶级强牌 ({hand_str})"
             )
         
@@ -95,16 +95,13 @@ class GTOBrain(Brain):
                 return ActionPlan(
                     primary_action=ActionType.RAISE if state.to_call == 0 else ActionType.CALL,
                     primary_amount=get_randomized_amount(adjusted_amount),
-                    call_range_min=0,
-                    call_range_max=6,
+                    limit_amount=6,
                     reasoning=f"强牌 ({hand_str})"
                 )
             return ActionPlan(
                 primary_action=ActionType.CALL,
-                call_range_min=0,
-                call_range_max=6,
+                limit_amount=6,
                 fallback_action=ActionType.FOLD,
-                fold_threshold=6,
                 reasoning=f"强牌谨慎 ({hand_str})"
             )
         
@@ -112,33 +109,28 @@ class GTOBrain(Brain):
             if pos_code in ["LP", "MP"] and state.to_call <= 4:
                 return ActionPlan(
                     primary_action=ActionType.CALL,
-                    call_range_min=0,
-                    call_range_max=4,
+                    limit_amount=4,
                     reasoning=f"中等牌 ({hand_str})"
                 )
             return ActionPlan(
                 primary_action=ActionType.CALL,
-                call_range_min=0,
-                call_range_max=2,
+                limit_amount=3,
                 fallback_action=ActionType.FOLD,
-                fold_threshold=3,
                 reasoning=f"中等牌谨慎 ({hand_str})"
             )
         
         if in_range:
             return ActionPlan(
                 primary_action=ActionType.CALL,
-                call_range_min=0,
-                call_range_max=4,
+                limit_amount=5,
                 fallback_action=ActionType.FOLD,
-                fold_threshold=5,
                 reasoning=f"入池范围 ({hand_str})"
             )
         
         return ActionPlan(
             primary_action=ActionType.CHECK,
             fallback_action=ActionType.FOLD,
-            fold_threshold=1,
+            limit_amount=1,
             reasoning=f"弱牌弃牌 ({hand_str})"
         )
     
@@ -309,8 +301,9 @@ class GTOBrain(Brain):
             return ActionPlan(
                 primary_action=ActionType.RAISE,
                 primary_amount=get_randomized_amount(final_amount),
-                call_range_min=0,
-                call_range_max=int(pot * 0.3),
+                secondary_action=ActionType.CALL if state.to_call > 0 else ActionType.CHECK,
+                secondary_probability=0.1, # 10% 概率平衡跟注
+                limit_amount=int(pot * 0.3),
                 bet_size_hint=optimal_hint,
                 reasoning=f"强牌 ({hand_str}) Equity:{equity:.1%} OptHint:{optimal_hint}"
             )
@@ -322,7 +315,7 @@ class GTOBrain(Brain):
                 return ActionPlan(
                     primary_action=ActionType.CHECK,
                     fallback_action=ActionType.FOLD,
-                    fold_threshold=0,
+                    limit_amount=0,
                     reasoning=f"EV为负弃牌 ({hand_str}) EV:{ev_result['call_ev']}"
                 )
 
@@ -331,7 +324,7 @@ class GTOBrain(Brain):
                 return ActionPlan(
                     primary_action=ActionType.CHECK,
                     fallback_action=ActionType.FOLD,
-                    fold_threshold=0,
+                    limit_amount=0,
                     reasoning=f"对抗跟注站弃牌 ({hand_str})"
                 )
 
@@ -340,7 +333,7 @@ class GTOBrain(Brain):
                 return ActionPlan(
                     primary_action=ActionType.CHECK,
                     fallback_action=ActionType.FOLD,
-                    fold_threshold=0,
+                    limit_amount=0,
                     reasoning=f"多人底池弱牌弃牌 ({hand_str})"
                 )
 
@@ -349,25 +342,23 @@ class GTOBrain(Brain):
                 return ActionPlan(
                     primary_action=ActionType.CHECK,
                     fallback_action=ActionType.FOLD,
-                    fold_threshold=0,
+                    limit_amount=0,
                     reasoning=f"大注弃牌 ({hand_str})"
                 )
 
             # 标准跟注
             return ActionPlan(
                 primary_action=ActionType.CALL,
-                call_range_min=0,
-                call_range_max=int(pot * 0.25),  # 收紧跟注范围
-                fallback_action=ActionType.FOLD,  # 超过范围直接弃牌
-                fold_threshold=int(pot * 0.25),
+                limit_amount=int(pot * 0.25),
+                fallback_action=ActionType.FOLD,
                 reasoning=f"边缘牌跟注 ({hand_str}) Equity: {equity:.1%}"
             )
 
-        # 弱牌：弃牌
+        # 弱牌：彻底弃牌
         return ActionPlan(
-            primary_action=ActionType.CHECK,
+            primary_action=ActionType.FOLD if call_amount > 0 else ActionType.CHECK,
             fallback_action=ActionType.FOLD,
-            fold_threshold=0,
+            limit_amount=0,
             reasoning=f"弱牌弃牌 ({hand_str}) Equity: {equity:.1%}"
         )
     

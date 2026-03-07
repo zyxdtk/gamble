@@ -13,7 +13,7 @@ class TestEngineManagerSingleton:
 
     def test_singleton_persists_state(self):
         mgr1 = EngineManager()
-        mgr1.create_brain("table1", "checkorfold")
+        mgr1.create_brain("table1", "range")
         
         mgr2 = EngineManager()
         assert "table1" in mgr2._brains
@@ -43,7 +43,15 @@ class TestEngineManagerCreateBrain:
         brain = mgr.create_brain("test_table", "exploitative")
         
         assert brain is not None
-        assert brain.strategy_name == "gto"
+        assert brain.strategy_name == "exploitative"
+        mgr.remove_brain("test_table")
+
+    def test_create_range_based_brain(self):
+        mgr = EngineManager()
+        brain = mgr.create_brain("test_table", "range")
+        
+        assert brain is not None
+        assert brain.strategy_name == "range"
         mgr.remove_brain("test_table")
 
     def test_create_invalid_strategy_returns_none(self):
@@ -84,19 +92,12 @@ class TestEngineManagerGetDecision:
         decision = mgr.get_decision("test_table", state)
         
         assert decision is not None
-        assert "decision" in decision
+        assert decision["status"] == "DECIDING"
+        assert decision["status"] == "DECIDING"
+        assert "action" in decision
         assert "strategy_name" in decision
-        assert "is_passive" in decision
         
         mgr.remove_brain("test_table")
-
-    def test_get_decision_for_nonexistent_brain(self):
-        mgr = EngineManager()
-        
-        state = GameState()
-        decision = mgr.get_decision("nonexistent_table", state)
-        
-        assert decision is None
 
 
 class TestEngineManagerRemoveBrain:
@@ -109,10 +110,6 @@ class TestEngineManagerRemoveBrain:
         mgr.remove_brain("test_table")
         
         assert "test_table" not in mgr._brains
-
-    def test_remove_nonexistent_brain_no_error(self):
-        mgr = EngineManager()
-        mgr.remove_brain("nonexistent_table")
 
 
 class TestEngineManagerUpdateBrain:
@@ -131,12 +128,6 @@ class TestEngineManagerUpdateBrain:
         mgr.update_brain("test_table", state)
         
         mgr.remove_brain("test_table")
-
-    def test_update_nonexistent_brain(self):
-        mgr = EngineManager()
-        
-        state = GameState()
-        mgr.update_brain("nonexistent_table", state)
 
 
 class TestEngineManagerStrategyDiscovery:

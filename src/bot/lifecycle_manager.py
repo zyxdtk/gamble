@@ -27,11 +27,10 @@ class LifecycleManager:
                     # 检查是否已经有筹码（已买入）
                     if self.tm.state.total_chips and self.tm.state.total_chips > 0:
                         self.tm.is_sitting = True
-                        # 设置初始筹码和买入金额（用于统计）
-                        if self.tm.initial_chips is None:
-                            self.tm.initial_chips = self.tm.state.total_chips
-                            self.tm.total_buyin = self.tm.state.total_chips
-                            print(f"[TABLE] Already seated at table with {self.tm.state.total_chips} chips. Initial buyin recorded: {self.tm.total_buyin}", flush=True)
+                        # 设置初始筹码（用于统计）
+                        if self.tm.starting_stack is None:
+                            self.tm.starting_stack = self.tm.state.total_chips
+                            print(f"[TABLE] Already seated at table with {self.tm.state.total_chips} chips. Starting stack recorded: {self.tm.starting_stack}", flush=True)
                         else:
                             print(f"[TABLE] Already seated at table with {self.tm.state.total_chips} chips.", flush=True)
                         return True
@@ -158,12 +157,14 @@ class LifecycleManager:
                 await asyncio.sleep(2)
                 self.tm.is_sitting = True
                 if buyin_amount > 0:
-                    self.tm.total_buyin += buyin_amount
-                    # 设置初始筹码（如果还未设置）
-                    if self.tm.initial_chips is None:
-                        self.tm.initial_chips = buyin_amount
-                        print(f"[TABLE] Initial chips set: {self.tm.initial_chips}", flush=True)
-                    print(f"[TABLE] Total buyin updated: {self.tm.total_buyin}", flush=True)
+                    # 如果还没有起始筹码，这笔买入就是起始筹码
+                    if self.tm.starting_stack is None:
+                        self.tm.starting_stack = buyin_amount
+                        print(f"[TABLE] Initial chips (starting_stack) set: {self.tm.starting_stack}", flush=True)
+                    else:
+                        # 否则，这是中途追加的买入
+                        self.tm.added_buyin += buyin_amount
+                        print(f"[TABLE] Mid-game buy-in added: {buyin_amount}. Total added: {self.tm.added_buyin}", flush=True)
                 return True
             else:
                 print("[TABLE] Buy-in dialog found but no confirm button.", flush=True)
@@ -304,9 +305,9 @@ class LifecycleManager:
         current = self.tm.state.total_chips or 0
         status["current_chips"] = current
 
-        # 盈亏相关逻辑需要 initial_chips
-        if self.tm.initial_chips is not None:
-            profit = current - self.tm.initial_chips
+        # 盈亏相关逻辑需要 starting_stack
+        if self.tm.starting_stack is not None:
+            profit = current - (self.tm.starting_stack + self.tm.added_buyin)
             status["profit"] = profit
 
             if profit <= -stop_loss:

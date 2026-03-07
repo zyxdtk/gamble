@@ -216,29 +216,88 @@ class EquityCalculator:
         }
 
     def get_hand_strength(self, hole_cards: list[str], community_cards: list[str]) -> dict:
-
         """识别当前的牌型。"""
         if not self.evaluator or not Card or not community_cards:
-            return {"combination": "none", "points": 0}
+            return {"combination": "none", "points": 0, "draws": self.detect_draws(hole_cards, community_cards)}
             
         try:
             hero_cards = [self._to_treys(c) for c in hole_cards]
             board_cards = [self._to_treys(c) for c in community_cards]
             
             if None in hero_cards or None in board_cards:
-                return {"combination": "none", "points": 0}
+                return {"combination": "none", "points": 0, "draws": self.detect_draws(hole_cards, community_cards)}
             
             # 使用 treys evaluator 获取得分和牌型类
             score = self.evaluator.evaluate(hero_cards, board_cards)
             hand_class = self.evaluator.get_rank_class(score)
             class_str = self.evaluator.class_to_string(hand_class).lower().replace(" ", "_")
             
+            # 增加听牌识别
+            draws = self.detect_draws(hole_cards, community_cards)
+            
             return {
                 "combination": class_str,
                 "points": 8000 - score, # score 越小牌越强，转换成点数
+                "draws": draws
             }
         except Exception:
-            return {"combination": "none", "points": 0}
+            return {"combination": "none", "points": 0, "draws": self.detect_draws(hole_cards, community_cards)}
+
+    def detect_draws(self, hole_cards: list[str], community_cards: list[str]) -> dict:
+        """
+        探测当前的听牌情况（Flush Draw, OESD, Gutshot）
+        """
+        result = {
+            "flush_draw": False,
+            "flush_outs": 0,
+            "oesd": False,
+            "gutshot": False,
+            "straight_outs": 0
+        }
+        
+        if not hole_cards or len(hole_cards) < 2:
+            return result
+            
+        all_cards = hole_cards + community_cards
+        if len(all_cards) < 4: # 至少 4 张才能听牌
+            return result
+
+        # 1. 探测 Flush Draw (4 张同色)
+        suits = [c[1].lower() for c in all_cards]
+        for s in set(suits):
+            if suits.count(s) == 4:
+                result["flush_draw"] = True
+                result["flush_outs"] = 9
+                break
+
+        # 2. 探测顺子听牌 (使用点数去重排序)
+        rank_map = {"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,"T":10,"J":11,"Q":12,"K":13,"A":14}
+        ranks = sorted(list(set([rank_map.get(c[0].upper(), 0) for c in all_cards])))
+        
+        if 14 in ranks: # 处理 A
+            ranks = [1] + ranks # 把 A 当作 1 处理一次
+            ranks = sorted(list(set(ranks)))
+
+        # 滑动窗口查找 4 张连续或跨度为 4 的组合
+        for i in range(len(ranks)):
+            for j in range(i + 3, len(ranks)):
+                sub = ranks[i:j+1]
+                if len(sub) < 4: continue
+                
+                # 取 4 张
+                for k in range(len(sub) - 3):
+                    window = sub[k:k+4]
+                    span = window[-1] - window[0]
+                    
+                    if span == 3: # OESD (如果是两头)
+                        # 检查两头是否都能补 (1-14 溢出除外)
+                        result["oesd"] = True
+                        result["straight_outs"] = max(result["straight_outs"], 8)
+                    elif span == 4: # Gutshot
+                        result["gutshot"] = True
+                        result["straight_outs"] = max(result["straight_outs"], 4)
+                        
+        return result
             
     def _to_treys(self, card_str: str):
         if len(card_str) == 2:

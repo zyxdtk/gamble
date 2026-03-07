@@ -23,6 +23,7 @@ class MockBrain(Brain):
         return ActionPlan(
             primary_action=ActionType.RAISE,
             primary_amount=50,
+            limit_amount=1000,
             confidence=0.9,
             reasoning="Mock deep think"
         )
@@ -31,7 +32,7 @@ class MockBrain(Brain):
 class TestBrainInit:
     def test_default_thinking_timeout(self):
         brain = MockBrain()
-        assert brain.thinking_timeout == 2.0
+        assert brain.thinking_timeout == 10.0
 
     def test_custom_thinking_timeout(self):
         brain = MockBrain(thinking_timeout=5.0)
@@ -43,21 +44,16 @@ class TestBrainInit:
 
 
 class TestBrainReceiveUpdate:
-    def test_receive_table_update(self):
+    def test_receive_table_update_no_op(self):
         brain = MockBrain()
         
         state = GameState()
         state.hole_cards = ["As", "Kh"]
-        state.pot = 30
-        state.to_call = 20
-        state.my_seat_id = 1
-        state.current_dealer_seat = 5
-        state.players = {i: Player(seat_id=i) for i in range(1, 7)}
         
         brain.receive_table_update(state)
         
-        assert brain.current_plan is not None
-        assert brain.current_plan.reasoning == "Mock initial plan"
+        # 现在 receive_table_update 不再设置计划
+        assert brain.current_plan is None
 
 
 class TestBrainMakeDecision:
@@ -75,8 +71,10 @@ class TestBrainMakeDecision:
         decision = brain.make_decision(state)
         
         assert isinstance(decision, dict)
+        assert decision["status"] == "DECIDING"
+        assert decision["action"] == "RAISE"
+        assert decision["amount"] == 50
         assert "strategy_name" in decision
-        assert "is_passive" in decision
         assert "plan" in decision
 
     def test_make_decision_with_empty_state(self):
@@ -86,7 +84,10 @@ class TestBrainMakeDecision:
         decision = brain.make_decision(state)
         
         assert decision is not None
-        assert decision["strategy_name"] == "mock"
+        assert decision["status"] == "WAITING"
+        assert "action" not in decision
+        assert "amount" not in decision
+        assert decision["plan"] is None
 
 
 class TestBrainReset:
@@ -95,7 +96,7 @@ class TestBrainReset:
         
         state = GameState()
         state.hole_cards = ["As", "Kh"]
-        brain.receive_table_update(state)
+        brain.make_decision(state)
         
         assert brain.current_plan is not None
         

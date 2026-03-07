@@ -1,11 +1,10 @@
 """
-测试位置计算工具
+测试位置计算与手牌规范化工具
 """
 from src.core.game_state import GameState, Player
 from src.engine.utils.position import (
     get_position_code,
-    get_player_tag,
-    normalize_hand_string,
+    normalize_hand_string
 )
 
 
@@ -51,56 +50,6 @@ class TestGetPositionCode:
         state = GameState()
         code = get_position_code(state)
         assert code == "ALL"
-
-
-class TestGetPlayerTag:
-    def test_nit_player(self):
-        player = Player(seat_id=1, name="NitPlayer")
-        player.hands_played = 100
-        player.vpip_actions = 10
-        player.pfr_actions = 5
-        
-        tag = get_player_tag(player)
-        
-        assert "紧" in tag or "Tight" in tag
-
-    def test_maniac_player(self):
-        player = Player(seat_id=1, name="ManiacPlayer")
-        player.hands_played = 100
-        player.vpip_actions = 80
-        player.pfr_actions = 60
-        
-        tag = get_player_tag(player)
-        
-        assert "疯" in tag or "Maniac" in tag
-
-    def test_fish_player(self):
-        player = Player(seat_id=1, name="FishPlayer")
-        player.hands_played = 100
-        player.vpip_actions = 50
-        player.pfr_actions = 5
-        
-        tag = get_player_tag(player)
-        
-        assert "被动" in tag or "Fish" in tag or "跟注" in tag
-
-    def test_tag_player(self):
-        player = Player(seat_id=1, name="TAGPlayer")
-        player.hands_played = 100
-        player.vpip_actions = 20
-        player.pfr_actions = 16
-        
-        tag = get_player_tag(player)
-        
-        assert "紧凶" in tag or "TAG" in tag
-
-    def test_unknown_player(self):
-        player = Player(seat_id=1, name="NewPlayer")
-        player.hands_played = 0
-        
-        tag = get_player_tag(player)
-        
-        assert "样本不足" in tag
 
 
 class TestNormalizeHandString:

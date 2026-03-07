@@ -89,14 +89,12 @@ class Brain(ABC):
 class ActionPlan:
     primary_action: ActionType      # 主要行动
     primary_amount: int             # 主要行动金额
-    fallback_action: ActionType     # 备选行动
-    fallback_amount: int            # 备选行动金额
-    bet_size_hint: str              # 加注尺度提示 (min, half_pot, pot, max)
-    call_range_min: int             # 跟注范围下限
-    call_range_max: int             # 跟注范围上限
-    raise_range_min: int            # 加注范围下限
-    raise_range_max: int            # 加注范围上限
-    fold_threshold: int             # 弃牌阈值
+    secondary_action: ActionType    # 备选行动（用于混合策略/平衡）
+    secondary_amount: int           # 备选行动金额
+    secondary_probability: float    # 执行备选动作的概率 (0.0-1.0)
+    bet_size_hint: str              # 尺度提示 (min, half_pot, pot, max)
+    limit_amount: int               # 承受上限（超过则回退）
+    fallback_action: ActionType     # 安全回退行动（通常为 FOLD）
     confidence: float               # 置信度
     reasoning: str                  # 决策理由
 ```
@@ -105,12 +103,10 @@ class ActionPlan:
 ```python
 def get_action_for_bet(self, to_call: int, pot: int) -> tuple[ActionType, int]:
     """
-    根据对手押注自动选择行动：
-    - 如果可以免费看牌 -> CHECK
-    - 如果押注超过弃牌阈值 -> FOLD
-    - 如果押注在跟注范围内 -> CALL
-    - 如果押注低于加注范围下限 -> RAISE
-    - 否则 -> 使用备选行动
+    环境适配与决策执行：
+    1. 安全校验：如果 to_call > limit_amount -> 返回 fallback_action。
+    2. 混合策略选择：基于概率（random）在 primary 和 secondary 动作中二选一。
+    3. 尺度转换：如果主要银弹包含 hint，映射到 ReplayPoker 的按钮点击。
     """
 ```
 

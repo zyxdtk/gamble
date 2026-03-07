@@ -63,22 +63,7 @@ def normalize_hand_string(hole_cards: list[str]) -> str:
         return "XX"
 
 
-def get_player_tag(player) -> str:
-    if player.hands_played < 5:
-        return "样本不足"
-    
-    vpip = player.vpip
-    pfr = player.pfr
-    
-    if vpip > 40 and pfr < 10:
-        return "跟注站 (Calling Station)"
-    if vpip > 50 and pfr > 30:
-        return "疯子 (Maniac)"
-    if vpip < 15:
-        return "紧逼 (Nit/Tight)"
-    if vpip < 25 and pfr > 15:
-        return "紧凶 (TAG)"
-    if vpip > 30 and pfr < 15:
-        return "宽松被动 (Fish)"
-    
-    return "普通 (Average)"
+from src.engine.player_analysis import PlayerTag
+
+
+# 玩家分析逻辑已迁移至 src/engine/utils/player_tags.py

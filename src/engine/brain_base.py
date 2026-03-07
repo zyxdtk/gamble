@@ -5,15 +5,17 @@ import threading
 
 from ..core.game_state import GameState
 from .action_plan import ActionPlan, ActionType
+from .player_analysis import PlayerManager
 
 
 class Brain(ABC):
     strategy_name: str = "base"
 
-    def __init__(self, thinking_timeout: float = 2.0):
+    def __init__(self, thinking_timeout: float = 10.0):
         self.thinking_timeout = thinking_timeout
         self.current_plan: Optional[ActionPlan] = None
         self._lock = threading.Lock()
+        self.player_mgr = PlayerManager()
 
     def create_initial_plan(self, state: GameState) -> ActionPlan:
         """创建初始计划 - 基类提供简单的check/fold实现"""
@@ -36,6 +38,15 @@ class Brain(ABC):
 
     def make_decision(self, state: GameState) -> dict:
         """做出决策 - 执行 deep_think 获取新计划"""
+        # 如果没有底牌，说明还没开始或状态未同步，统一返回 WAIT
+        if not state.hole_cards:
+            return {
+                "status": "WAITING",
+                "strategy_name": self.strategy_name,
+                "plan": None,
+                "available_actions": state.available_actions
+            }
+
         with self._lock:
             try:
                 # 执行深度思考获取新计划
@@ -60,17 +71,15 @@ class Brain(ABC):
             pot_odds = to_call / (pot + to_call) if (pot + to_call) > 0 else 0.0
 
             return {
-                "decision": {
-                    "action": action.value,
-                    "amount": int(amount)  # 确保金额为整数
-                },
+                "status": "DECIDING",
+                "action": action.value,
+                "amount": int(amount),  # 确保金额为整数
                 "strategy_name": self.strategy_name,
-                "is_passive": False,
-                "my_action": f"{self.current_plan.reasoning} -> {action.value}",
                 "plan": self.current_plan.to_dict(),
                 "my_equity": my_equity,
                 "pot_odds": pot_odds,
                 "my_hand_strength": self.current_plan.reasoning,
+                "available_actions": state.available_actions, # 传回可用动作
                 "bet_size_hint": getattr(self.current_plan, "bet_size_hint", None),
             }
 

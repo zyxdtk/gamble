@@ -55,7 +55,7 @@ class TaskState:
     total_tables: int = 0
     total_hands: int = 0
     total_cycles: int = 0
-    total_buyin: int = 0
+    total_buyin_added: int = 0
     total_profit: int = 0
     
     # 当前桌子状态
@@ -75,7 +75,7 @@ class TaskState:
             "total_tables": self.total_tables,
             "total_hands": self.total_hands,
             "total_cycles": self.total_cycles,
-            "total_buyin": self.total_buyin,
+            "total_buyin_added": self.total_buyin_added,
             "total_profit": self.total_profit,
             "current_table_id": self.current_table_id,
             "completion_reason": self.completion_reason,
@@ -120,6 +120,15 @@ class TaskManager:
         # 尽早设置策略环境变量
         import os
         os.environ["POKER_STRATEGY"] = self.config.strategy
+        
+        # 根据任务类型设置单桌限制环境变量
+        if self.config.task_type == TaskType.CYCLES:
+            os.environ["POKER_MAX_CYCLES"] = str(self.config.target_value)
+        elif self.config.task_type == TaskType.HANDS:
+            os.environ["POKER_MAX_HANDS"] = str(self.config.target_value)
+        elif self.config.task_type == TaskType.INFINITE:
+            # 无限模式下，给一个较大的单桌上限（或者不设限）
+            os.environ["POKER_MAX_CYCLES"] = "100" 
         
         # 创建并启动 BrowserManager
         self.browser_mgr = BrowserManager(
@@ -205,7 +214,7 @@ class TaskManager:
         # 更新累计数据
         self.state.total_hands = stats.get("total_hands_played", 0)
         self.state.total_cycles = stats.get("total_cycles_completed", 0)
-        self.state.total_buyin = stats.get("total_buyin", 0)
+        self.state.total_buyin_added = stats.get("total_buyin_added", 0)
         self.state.total_profit = stats.get("total_profit", 0)
         self.state.total_tables = stats.get("tables_played", 0)
         
@@ -285,7 +294,7 @@ class TaskManager:
         print(f"  Tables played: {stats['total_tables']}")
         print(f"  Hands played: {stats['total_hands']}")
         print(f"  Cycles completed: {stats['total_cycles']}")
-        print(f"  Total buyin: {stats['total_buyin']}")
+        print(f"  Total buyin: {stats['total_buyin_added']}")
         print(f"  Total profit: {stats['total_profit']}")
         print("-" * 50)
 
@@ -314,9 +323,9 @@ class TaskManager:
                 "tables_played": stats['total_tables'],
                 "hands_played": stats['total_hands'],
                 "cycles_completed": stats['total_cycles'],
-                "total_buyin": stats['total_buyin'],
+                "total_buyin_added": stats['total_buyin_added'],
                 "total_profit": stats['total_profit'],
-                "final_chips": stats['total_buyin'] + stats['total_profit'],
+                "final_chips": stats['total_buyin_added'] + stats['total_profit'],
             },
         }
 

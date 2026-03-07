@@ -17,8 +17,10 @@ cd "$SCRIPT_DIR"
 
 PID_FILE="data/poker_ai.pid"
 
-# ─── 检查虚拟环境 ─────────────────────────────────────────────────────────────
-if [ ! -d ".venv" ]; then
+# ─── 检查并激活虚拟环境 ───────────────────────────────────────────────────────
+if [ -d ".venv" ]; then
+    source .venv/bin/activate
+else
     echo -e "${RED}错误: 虚拟环境不存在，请先运行 'uv sync' 创建虚拟环境${NC}"
     exit 1
 fi
@@ -108,15 +110,25 @@ ARG_TARGET_TYPE=$3
 ARG_TARGET_VAL=$4
 
 # 默认配置
-MODE_FLAG="--mode assist"
-MODE_NAME="💡 辅助模式 (Assist)"
-STRATEGY_FLAG="exploitative"
-STRATEGY_NAME="🎯 剥削性 (Exploitative)"
-TASK_FLAG=""
-TASK_NAME="♾️ 无限运行"
+MODE_FLAG="--mode auto"
+MODE_NAME="🤖 自动模式 (Auto)"
+STRATEGY_FLAG="range"
+STRATEGY_NAME="📊 Range 策略"
+TASK_FLAG="--profit 2000"
+TASK_NAME="💰 盈利目标: 2000"
 HEADLESS_FLAG=""
 HEADLESS_NAME="🖥️ 显示窗口"
-SKIP_INTERACTIVE=false
+SKIP_INTERACTIVE=true
+
+# 若传入 --interactive 则进入手动选择流程
+if [[ "$1" == "--interactive" || "$1" == "-i" ]]; then
+    SKIP_INTERACTIVE=false
+    shift
+    ARG_MODE=$1
+    ARG_STRATEGY=$2
+    ARG_TARGET_TYPE=$3
+    ARG_TARGET_VAL=$4
+fi
 
 # 处理命令行参数
 if [ -n "$ARG_MODE" ]; then
@@ -143,6 +155,7 @@ if [ -n "$ARG_STRATEGY" ]; then
         gto) STRATEGY_FLAG="gto" ; STRATEGY_NAME="📐 GTO 策略" ;;
         checkorfold) STRATEGY_FLAG="checkorfold" ; STRATEGY_NAME="🛡️ 保育策略" ;;
         exploitative) STRATEGY_FLAG="exploitative" ; STRATEGY_NAME="🎯 剥削策略" ;;
+        range) STRATEGY_FLAG="range" ; STRATEGY_NAME="📊 Range 策略" ;;
         headless) HEADLESS_FLAG="--headless" ; HEADLESS_NAME="👻 无头模式" ;;
     esac
 fi
@@ -181,15 +194,17 @@ if [ "$SKIP_INTERACTIVE" = false ]; then
     if [ "$MODE_FLAG" = "--mode auto" ] || [ "$MODE_FLAG" = "--mode assist" ]; then
         echo ""
         echo -e "${BOLD}【2/4】决策策略${NC}"
-        echo -e "  ${GREEN}[1]${NC} exploitative - 剥削性策略"
-        echo -e "  ${CYAN}[2]${NC} gto          - GTO 策略"
-        echo -e "  ${YELLOW}[3]${NC} checkorfold  - 保守策略"
+        echo -e "  ${GREEN}[1]${NC} range        - Range 策略（默认）"
+        echo -e "  ${CYAN}[2]${NC} exploitative - 剥削性策略"
+        echo -e "  ${YELLOW}[3]${NC} gto          - GTO 策略"
+        echo -e "  ${RED}[4]${NC} checkorfold  - 保守策略"
         echo ""
-        read -rp "  请输入策略 [1/2/3, 默认 1]: " strat_choice
+        read -rp "  请输入策略 [1/2/3/4, 默认 1]: " strat_choice
         case "$strat_choice" in
-            2) STRATEGY_FLAG="gto" ; STRATEGY_NAME="📐 GTO 策略" ;;
-            3) STRATEGY_FLAG="checkorfold" ; STRATEGY_NAME="🛡️ 保守 (CheckOrFold)" ;;
-            *) STRATEGY_FLAG="exploitative" ; STRATEGY_NAME="🎯 剥削性 (Exploitative)" ;;
+            2) STRATEGY_FLAG="exploitative" ; STRATEGY_NAME="🎯 剥削性 (Exploitative)" ;;
+            3) STRATEGY_FLAG="gto" ; STRATEGY_NAME="📐 GTO 策略" ;;
+            4) STRATEGY_FLAG="checkorfold" ; STRATEGY_NAME="🛡️ 保守 (CheckOrFold)" ;;
+            *) STRATEGY_FLAG="range" ; STRATEGY_NAME="📊 Range 策略" ;;
         esac
     fi
 
@@ -267,7 +282,8 @@ if [ -d "data/browser_data" ]; then
     # 有时清理这些文件能解决“个人资料”报错
 fi
 
-LOG_FILE="logs/poker_ai.log"
+LOG_FILE="logs/poker_ai_$(date +%Y%m%d_%H%M%S).log"
+LOG_LATEST="logs/poker_ai.log"
 CMD="python -m src.main $MODE_FLAG"
 [ -n "$STRATEGY_FLAG" ] && CMD="$CMD --strategy $STRATEGY_FLAG"
 [ -n "$TASK_FLAG" ] && CMD="$CMD $TASK_FLAG"
@@ -277,13 +293,22 @@ CMD="python -m src.main $MODE_FLAG"
 [ -n "$STRATEGY_FLAG" ] && export POKER_STRATEGY="$STRATEGY_FLAG"
 
 echo ""
-echo -e "${GREEN}🚀 正在启动 Poker AI...${NC}"
+echo -e "${GREEN}🚀 正在启动 Poker AI (nohup 后台模式)...${NC}"
 echo -e "   命令: ${CYAN}$CMD${NC}"
+echo -e "   日志: ${CYAN}$LOG_FILE${NC}"
 echo ""
 
-source .venv/bin/activate && eval "$CMD" 2>&1 | tee -a "$LOG_FILE" &
+nohup $CMD >> "$LOG_FILE" 2>&1 &
 POKER_PID=$!
 echo $POKER_PID > "$PID_FILE"
-echo -e "${GREEN}✅ 已启动 (PID: $POKER_PID)${NC}"
-wait $POKER_PID
-rm -f "$PID_FILE"
+# 建立软链接 logs/poker_ai.log 指向最新日志
+ln -sf "$(basename "$LOG_FILE")" "$LOG_LATEST"
+
+sleep 1
+if ps -p "$POKER_PID" > /dev/null 2>&1; then
+    echo -e "${GREEN}✅ 已在后台启动 (PID: $POKER_PID)${NC}"
+    echo -e "   实时查看日志: ${CYAN}tail -f $LOG_FILE${NC}"
+else
+    echo -e "${RED}❌ 启动失败，请检查日志: $LOG_FILE${NC}"
+    rm -f "$PID_FILE"
+fi

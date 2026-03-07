@@ -1,11 +1,10 @@
 from .equity import EquityCalculator
-from .ranges import RangeManager
-from .position import get_position_code, normalize_hand_string, get_player_tag
+from .preflop_range import PreflopRangeManager
+from .position import get_position_code, normalize_hand_string
 
 __all__ = [
     'EquityCalculator',
-    'RangeManager',
+    'PreflopRangeManager',
     'get_position_code',
-    'normalize_hand_string',
-    'get_player_tag'
+    'normalize_hand_string'
 ]

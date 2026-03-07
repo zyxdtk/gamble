@@ -59,14 +59,22 @@ class PlayManager:
                     val = re.sub(r"[^\d]", "", chips_text)
                     if val:
                         self.tm.state.total_chips = int(val)
-                        if self.tm.initial_chips is None:
-                            self.tm.initial_chips = self.tm.state.total_chips
-                            # 同时记录买入金额，用于盈亏统计
-                            self.tm.total_buyin = self.tm.state.total_chips
-                            print(f"[TEST] 初始总筹码: {self.tm.initial_chips}, 买入: {self.tm.total_buyin}", flush=True)
+                        if self.tm.starting_stack is None:
+                            self.tm.starting_stack = self.tm.state.total_chips
+                            print(f"[TEST] 初始起始筹码: {self.tm.starting_stack}", flush=True)
 
             buttons = await self.find_action_buttons()
             self.tm.state.available_actions = list(buttons.keys())
+
+            # 提取 to_call (跟注金额)
+            self.tm.state.to_call = 0
+            if "call" in buttons:
+                btn = buttons["call"]
+                label = await btn.text_content()
+                digits = re.sub(r"[^\d]", "", label)
+                if digits:
+                    self.tm.state.to_call = int(digits)
+                    print(f"[TEST] Detected to_call: {self.tm.state.to_call}", flush=True)
 
             self.tm.state.min_raise = 0
             if "raise" in buttons or "bet" in buttons:

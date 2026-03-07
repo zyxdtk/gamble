@@ -4,7 +4,7 @@ import yaml
 from typing import Dict, List
 
 
-class RangeManager:
+class PreflopRangeManager:
     _instance = None
     
     def __new__(cls):

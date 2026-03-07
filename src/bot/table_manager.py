@@ -25,8 +25,8 @@ class TableManager:
         self.is_sitting = False
         self.is_closed = False
         self.exit_requested = False
-        self.initial_chips = None
-        self.total_buyin = 0
+        self.starting_stack = None  # 入场时的起始筹码量
+        self.added_buyin = 0       # 中途追加的买入金额
         self._full_table_ticks = 0
         self.my_user_id = None  # 用于识别自己的userId
         self._FULL_TABLE_LIMIT = 5
@@ -40,7 +40,7 @@ class TableManager:
 
         # 运行限制（可从外部设置）
         self.max_hands_limit = None  # 最大手数限制
-        self.max_cycles = 1          # 最大圈数限制
+        self.max_cycles = 10         # 最大圈数限制 (默认调高)
 
         self.stop_loss_bb = 100
         self.take_profit_bb = 300
@@ -272,11 +272,10 @@ class TableManager:
                 p.chips = p_data.get("chips", p_data.get("stack", p.chips))
                 if seat == self.state.my_seat_id:
                     self.state.total_chips = p.chips
-                    # 统计同步：初始化起始筹码和买入
-                    if self.initial_chips is None and p.chips > 0:
-                        self.initial_chips = p.chips
-                        self.total_buyin = p.chips
-                        print(f"[WS] Initialized stats: initial_chips={p.chips}, total_buyin={p.chips}", flush=True)
+                    # 统计同步：初始化起始筹码
+                    if self.starting_stack is None and p.chips > 0:
+                        self.starting_stack = p.chips
+                        print(f"[WS] Initialized stats: starting_stack={p.chips}", flush=True)
 
             raw_status = p_data.get("status") or p_data.get("state", "")
             if raw_status:
@@ -297,10 +296,9 @@ class TableManager:
                     self.state.my_seat_id = seat
                     self.state.total_chips = p.chips
                     # 同时在这里也做一次统计初始化检查
-                    if self.initial_chips is None and p.chips > 0:
-                        self.initial_chips = p.chips
-                        self.total_buyin = p.chips
-                        print(f"[WS] Initialized stats (userId match): initial_chips={p.chips}", flush=True)
+                    if self.starting_stack is None and p.chips > 0:
+                        self.starting_stack = p.chips
+                        print(f"[WS] Initialized stats (userId match): starting_stack={p.starting_stack}", flush=True)
                     print(f"[WS] Updated my_seat_id to {seat} (matched userId)", flush=True)
             elif seat == self.state.my_seat_id:
                 if self.my_user_id is None and user_id:
@@ -371,21 +369,14 @@ class TableManager:
 
             await self.play_mgr.update_state_from_dom()
 
-            # 获取决策（PlayManager 负责引擎交互）
-            dummy_decision = self.play_mgr.request_decision()
-            if dummy_decision is None:
-                print("[TABLE] Error: Engine returned None decision.", flush=True)
-                return
-            is_passive = dummy_decision.get("is_passive", False)
-
             # TableManager 负责决定是否离开桌子
             # 优先检查退出条件（即使还没入座，如果识别到筹码超标也要走）
             exit_status = self.lifecycle_mgr.get_exit_status()
-            if not is_passive and self._should_leave_table(exit_status):
+            if not self.apprentice_mode and self._should_leave_table(exit_status):
                 await self.lifecycle_mgr.leave_table()
                 return
 
-            if not self.is_sitting and not is_passive:
+            if not self.is_sitting and not self.apprentice_mode:
                 sat = await self.lifecycle_mgr.try_sit_and_buyin()
                 if not sat:
                     self._full_table_ticks += 1
@@ -416,12 +407,11 @@ class TableManager:
             # 输出策略思考日志（支持所有策略类型）
             turn_key = f"{strategy_name}-{self.state.hole_cards}-{self.state.community_cards}"
             if self._last_log_turn != turn_key:
-                decision_info = decision_data.get("decision") or {}
-                action = decision_info.get("action", "WAIT")
-                amount = decision_info.get("amount", 0)
+                action = decision_data.get("action", "WAIT")
+                amount = decision_data.get("amount", 0)
                 equity = decision_data.get('my_equity', 0)
                 hand = self.state.hole_cards if self.state.hole_cards else "Unknown"
-                plan_info = decision_data.get("my_action", "")
+                plan_info = decision_data.get("plan", {}).get("reasoning", "")
 
                 # 根据策略类型输出不同格式的日志
                 if strategy_name in ["GTO", "gto"]:
@@ -440,19 +430,15 @@ class TableManager:
                         print(f"[EXPLOITATIVE PLAN] {plan_info}", flush=True)
                 elif strategy_name in ["checkorfold", "CHECKORFOLD", "check_or_fold"]:
                     print(f"[CHECK/FOLD THINKING] Hand: {hand}, Action: {action}", flush=True)
-                    if plan_info:
-                        print(f"[CHECK/FOLD PLAN] {plan_info}", flush=True)
                 else:
                     print(f"[{strategy_name.upper()} THINKING] Hand: {hand}, Action: {action}", end="")
                     if amount > 0:
                         print(f" (Amount: {amount})", end="")
                     print(f", Equity: {equity * 100:.1f}%", flush=True)
-                    if plan_info:
-                        print(f"[{strategy_name.upper()} PLAN] {plan_info}", flush=True)
 
                 self._last_log_turn = turn_key
 
-            if is_passive:
+            if self.apprentice_mode:
                 turn_key = f"{self.state.hole_cards}-{self.state.community_cards}"
                 if self._last_log_turn != turn_key:
                     print(f"[STRATEGY: {strategy_name}] Action turn. Pot: {self.state.pot}. Call: {self.state.to_call}. MinRaise: {self.state.min_raise}", flush=True)
@@ -460,14 +446,11 @@ class TableManager:
                     self._last_log_turn = turn_key
                 return
 
-            decision_obj = decision_data.get("decision") if isinstance(decision_data, dict) else None
+            action = decision_data.get("action", "")
+            amount = decision_data.get("amount", 0)
+            bet_size_hint = decision_data.get("bet_size_hint")
             
-            if decision_obj and isinstance(decision_obj, dict):
-                action = decision_obj.get("action", "")
-                amount = decision_obj.get("amount", 0)
-                bet_size_hint = decision_data.get("bet_size_hint") if isinstance(decision_data, dict) else None
-                
-                if action:
+            if action:
                     await self.hud.update_content(self.page, decision_data)
                     print(f"[STRATEGY: {strategy_name}] Executing: {action} (Amount: {amount}, Hint: {bet_size_hint})", flush=True)
                     await self.play_mgr.perform_click(action, amount=amount, bet_size_hint=bet_size_hint)

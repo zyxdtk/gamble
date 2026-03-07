@@ -49,9 +49,9 @@ Examples:
     # 策略类型
     parser.add_argument(
         "--strategy",
-        choices=["gto", "checkorfold", "exploitative"],
-        default="gto",
-        help="使用的策略类型 (默认: gto)"
+        choices=["gto", "checkorfold", "exploitative", "range"],
+        default="range",
+        help="使用的策略类型 (默认: range)"
     )
 
     # 任务类型

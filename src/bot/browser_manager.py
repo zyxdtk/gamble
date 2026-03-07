@@ -38,7 +38,7 @@ class BrowserManager:
         self._accumulated_stats = {
             "total_hands": 0,
             "total_cycles": 0,
-            "total_buyin": 0,
+            "total_buyin_added": 0,
             "total_profit": 0,
             "tables_completed": 0,
         }
@@ -169,26 +169,31 @@ class BrowserManager:
         self._accumulated_stats["total_hands"] += manager.hands_played
         self._accumulated_stats["total_cycles"] += manager.dealer_cycle_count
         
-        # 确保买入被记录
-        buyin = manager.total_buyin or manager.initial_chips or 0
-        self._accumulated_stats["total_buyin"] += buyin
-        
-        # 计算盈亏：最终筹码 - 起始筹码 (或买入)
+        # 修正买入和筹码统计
+        start_chips = manager.starting_stack or 0
+        added_buyin = manager.added_buyin or 0
         current_chips = manager.state.total_chips or 0
-        start_chips = manager.initial_chips or buyin
         
+        # 统计追加买入到全局
+        self._accumulated_stats["total_buyin_added"] += added_buyin
+        
+        # 计算盈利：最终筹码 - (初始筹码 + 追加买入)
         profit = 0
         if start_chips > 0:
-            profit = current_chips - start_chips
+            profit = current_chips - (start_chips + added_buyin)
             self._accumulated_stats["total_profit"] += profit
         
         self._accumulated_stats["tables_completed"] += 1
         
+        # 提取正确的 Table ID
+        table_url = manager.page.url
+        table_id = BrowserManager._extract_table_id(table_url) or "unknown"
+        
         print(
             f"[MANAGER] 🏁 Table Closed Statistics:\n"
-            f"   - Table ID: {manager._extract_table_id(manager.page.url) if hasattr(manager, '_extract_table_id') else 'unknown'}\n"
+            f"   - Table ID: {table_id}\n"
             f"   - Hands: {manager.hands_played}, Cycles: {manager.dealer_cycle_count}\n"
-            f"   - Buy-in: {buyin}, Final Chips: {current_chips}\n"
+            f"   - Start Stack: {start_chips}, Added Buy-in: {added_buyin}, Final Chips: {current_chips}\n"
             f"   - This Table Profit: {profit:+d}\n"
             f"   - Total Accumulated Profit: {self._accumulated_stats['total_profit']:+d}",
             flush=True
@@ -298,7 +303,7 @@ class BrowserManager:
         # 从累计统计开始
         total_hands = self._accumulated_stats["total_hands"]
         total_cycles = self._accumulated_stats["total_cycles"]
-        total_buyin = self._accumulated_stats["total_buyin"]
+        total_buyin_added = self._accumulated_stats["total_buyin_added"]
         total_chips = 0
         total_profit = self._accumulated_stats["total_profit"]
 
@@ -306,19 +311,23 @@ class BrowserManager:
         for table_id, manager in self.table_managers.items():
             total_hands += manager.hands_played
             total_cycles += manager.dealer_cycle_count
-            total_buyin += manager.total_buyin
-
-            if manager.initial_chips and manager.state.total_chips:
-                chips = manager.state.total_chips
-                profit = chips - manager.initial_chips
+            
+            start = manager.starting_stack or 0
+            added = manager.added_buyin or 0
+            chips = manager.state.total_chips or 0
+            
+            total_buyin_added += added
+            
+            if start > 0:
+                profit = chips - (start + added)
                 total_chips += chips
                 total_profit += profit
 
         stats["total_hands_played"] = total_hands
         stats["total_dealer_cycles"] = total_cycles
-        stats["total_buyin"] = total_buyin
-        stats["total_chips"] = total_chips
+        stats["total_buyin_added"] = total_buyin_added
         stats["total_profit"] = total_profit
+        stats["total_chips"] = total_chips
 
         return stats
 

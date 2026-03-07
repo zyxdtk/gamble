@@ -1,5 +1,35 @@
 # 德州扑克 AI 助手 - 更新日志
 
+## 2026-03-08 更新
+
+### 🧠 对手建模系统 (Player Analysis Module)
+- **模块化重组**: 将玩家分析相关组件迁移至独立包 `src/engine/player_analysis/`，包含 `tags.py`、`database.py`、`manager.py` 和多种范围模型。
+- **玩家标签体系**: 引入 `PlayerTag` 常量（`NIT`, `TAG`, `FISH`, `STATION`, `MANIAC`, `UNKNOWN`）并实现 `get_player_tag()` 分类函数。
+- **SQLite 持久化**: 新增 `PlayerDatabase`，通过 `player.user_id` 跨 Session 记录每位对手的 VPIP/PFR 历史统计。
+- **摊牌记录**: 扩展数据库新增 `player_showdowns` 表，记录对手在摊牌时展示的真实手牌，作为修正信号。
+- **`PlayerManager` 融合管理**: 统一管理会话内统计、全局持久化数据，并维护每位对手与 Hero 各自的独立范围模型。
+
+### 📊 多策略范围建模 (Multi-Strategy Range Modeling)
+- **`BaseRangeModel`**: 引入抽象基类，统一范围模型接口。
+- **`ActionBasedRangeModel`**: 基础动作驱动型贝叶斯更新模型（原 `RangeModel`，保持兼容）。
+- **`StatsAwareRangeModel`**: 结合 VPIP/PFR 历史数据修正贝叶斯衰减系数。Nit（紧手）的下注导致更剧烈的范围收缩，Maniac 的收缩则更缓慢。
+- **`ShowdownAwareRangeModel`**: 通过分析摊牌的"惊讶值"（实际牌力 vs 预期牌力的偏差）动态修正 `bias_factor`——经常诈唬的对手其 `bias_factor < 1.0`，让 AI 对其加注更宽容。
+- **智能三级自动切换**: `PlayerManager.get_range_model()` 根据样本量和是否有摊牌记录自动选择最优模型（ActionBased → StatsAware → ShowdownAware）。
+
+### ♟️ RangeBrain 策略升级 (Strategy Integration)
+- 新增 `RangeBrain` 策略，整合 EHS、听牌潜力、SPR 与对手范围紧凑度（Tightness Score）进行多维决策。
+- **对手紧凑度修正**: `_get_opponent_tightness()` 将范围活跃组合数转化为安全余量（Safety Margin），动态调整跟注阈值：面对 Nit 更保守，面对 Maniac 更积极"抓诈"。
+- **决策场景**: 价值提取（EHS>0.75）、半诈唬（强听牌+深筹）、防守弃牌（超池+紧型对手）、赔率跟注（修正阈值）。
+
+### 🚀 启动脚本升级 (start.sh)
+- 默认配置更新为：**自动模式 + Range 策略 + 盈利目标 2000**，直接 `./start.sh` 即可无交互启动。
+- 支持 `--interactive` (`-i`) 参数手动进入配置菜单。
+- 改用 `nohup` 后台运行，日志按时间戳命名（`logs/poker_ai_YYYYMMDD_HHMMSS.log`），`logs/poker_ai.log` 软链接始终指向最新日志，关闭终端后进程继续运行。
+
+### 🧪 测试覆盖
+- 全量 139+ 项单元测试全部通过，零回归。
+- 新增 `TestRangeBrainOpponentModeling` 测试类，覆盖 Nit/Maniac 差异化决策与摊牌诈唬者识别场景。
+
 ## 2026-02-28 更新
 
 ### 🏗️ 核心架构重构 (The 1M Project Refactoring)

@@ -4,6 +4,7 @@ from typing import List, Dict, Optional
 @dataclass
 class Player:
     seat_id: int
+    user_id: str = "" # 全局唯一标识符
     name: str = "Unknown"
     chips: int = 0
     is_active: bool = False  # True if currently in the hand (not folded)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
+import random
 
 
 class ActionType(Enum):
@@ -13,59 +15,65 @@ class ActionType(Enum):
 
 @dataclass
 class ActionPlan:
+    """
+    行动计划：Brain 根据当前状态预设的行动方案。
+    支持混合策略 (Mixed Strategy) 和 ReplayPoker 固定尺度。
+    """
     primary_action: ActionType = ActionType.CHECK
     primary_amount: int = 0
     
-    fallback_action: ActionType = ActionType.FOLD
+    # 混合策略支持
+    secondary_action: Optional[ActionType] = None
+    secondary_amount: int = 0
+    secondary_probability: float = 0.0 # 执行备选动作的概率 (0.0-1.0)
+    
+    # 尺度建议 (应对 ReplayPoker 按钮: "min", "half_pot", "pot", "max")
+    bet_size_hint: Optional[str] = None
+    
+    # 安全与性能参数
+    limit_amount: int = 0             # 允许执行计划动作的最大 to_call 金额 (安全阈值)
+    fallback_action: ActionType = ActionType.FOLD # 超过安全阈值后的强制退守动作
     fallback_amount: int = 0
     
-    call_range_min: int = 0
-    call_range_max: int = 0  # 默认为 0，表示不主动跟注
-    
-    raise_range_min: int = 0
-    raise_range_max: int = 999999999
-    
-    fold_threshold: int = 999999999
-    
-    confidence: float = 0.5
-    reasoning: str = ""
-    # 加注尺度提示：策略层向 PlayManager 指示目标加注档位
-    # 可选值: "min" | "half_pot" | "pot" | "max" | None (表示使用 primary_amount 精确值)
-    bet_size_hint: str | None = None
-    
+    # 决策元数据
+    confidence: float = 1.0
+    reasoning: str = "默认免费看牌"
+
     def get_action_for_bet(self, to_call: int, pot: int) -> tuple[ActionType, int]:
-        if to_call == 0:
-            if self.primary_action in [ActionType.CHECK, ActionType.RAISE]:
-                return self.primary_action, self.primary_amount
-            return ActionType.CHECK, 0
-        
-        if to_call > self.fold_threshold:
-            return ActionType.FOLD, 0
-        
-        if self.call_range_min <= to_call <= self.call_range_max:
-            return ActionType.CALL, to_call
-        
-        if to_call < self.raise_range_min and self.primary_action == ActionType.RAISE:
-            return ActionType.RAISE, self.primary_amount
-        
-        if to_call > self.raise_range_max:
-            return self.fallback_action, self.fallback_amount
-        
-        # 兜底安全性校验：如果有下注，且主要动作为 CHECK，则强制降级到 fallback
-        if to_call > 0 and self.primary_action == ActionType.CHECK:
+        """
+        根据当前环境做出最终裁决：
+        1. 安全检测
+        2. 混合策略机率决策
+        """
+        # A. 安全检测：如果对手下注超过我们的承受上限，强制退守 (通常为 FOLD)
+        if to_call > self.limit_amount:
             return self.fallback_action, self.fallback_amount
 
-        return self.primary_action, self.primary_amount
+        # B. 混合策略决策：如果定义了备选动作，按概率随机挑选
+        chosen_action = self.primary_action
+        chosen_amount = self.primary_amount
+        
+        if self.secondary_action and random.random() < self.secondary_probability:
+            chosen_action = self.secondary_action
+            chosen_amount = self.secondary_amount
+
+        # C. 兜底逻辑：如果计划是 CHECK 但不得不平扣（to_call > 0），
+        # 除非它是备选动作或主动作已选定为 CALL/RAISE，否则降级
+        if to_call > 0 and chosen_action == ActionType.CHECK:
+            return self.fallback_action, self.fallback_amount
+
+        return chosen_action, chosen_amount
 
     def to_dict(self) -> dict:
         return {
             "primary_action": self.primary_action.value,
             "primary_amount": self.primary_amount,
+            "secondary_action": self.secondary_action.value if self.secondary_action else None,
+            "secondary_amount": self.secondary_amount,
+            "secondary_probability": self.secondary_probability,
+            "bet_size_hint": self.bet_size_hint,
+            "limit_amount": self.limit_amount,
             "fallback_action": self.fallback_action.value,
-            "fallback_amount": self.fallback_amount,
-            "call_range": [self.call_range_min, self.call_range_max],
-            "raise_range": [self.raise_range_min, self.raise_range_max],
-            "fold_threshold": self.fold_threshold,
             "confidence": self.confidence,
             "reasoning": self.reasoning
         }
