@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 
 
 class LifecycleManager:
@@ -7,19 +8,19 @@ class LifecycleManager:
     def __init__(self, table_manager):
         self.tm = table_manager
         self._empty_table_since = None
-        self._SITOUT_LEAVE_DELAY = 20  # Seconds
+        self._SITOUT_LEAVE_DELAY = 60  # Seconds - 等待60秒让其他玩家加入
         self._table_full = False
         self._SIT_MAX_RETRIES = 10
         self._SIT_RETRY_INTERVAL = 2
         
     async def try_sit_and_buyin(self):
-        start_time = asyncio.get_event_loop().time()
+        start_time = time.time()
         retry_count = 0
         
         while retry_count < self._SIT_MAX_RETRIES:
             retry_count += 1
             try:
-                elapsed = asyncio.get_event_loop().time() - start_time
+                elapsed = time.time() - start_time
                 print(f"[TABLE] try_sit_and_buyin attempt {retry_count}, elapsed {elapsed:.1f}s", flush=True)
                 
                 my_seat, seat_id = await self._find_my_seat()
@@ -156,15 +157,14 @@ class LifecycleManager:
                 await confirm_btn.click()
                 await asyncio.sleep(2)
                 self.tm.is_sitting = True
-                if buyin_amount > 0:
-                    # 如果还没有起始筹码，这笔买入就是起始筹码
-                    if self.tm.starting_stack is None:
+                # 从DOM读取实际筹码数，而不是使用配置的买入金额
+                if self.tm.starting_stack is None:
+                    if self.tm.state.total_chips and self.tm.state.total_chips > 0:
+                        self.tm.starting_stack = self.tm.state.total_chips
+                    elif buyin_amount > 0:
                         self.tm.starting_stack = buyin_amount
-                        print(f"[TABLE] Initial chips (starting_stack) set: {self.tm.starting_stack}", flush=True)
-                    else:
-                        # 否则，这是中途追加的买入
-                        self.tm.added_buyin += buyin_amount
-                        print(f"[TABLE] Mid-game buy-in added: {buyin_amount}. Total added: {self.tm.added_buyin}", flush=True)
+                    if self.tm.starting_stack:
+                        print(f"[TABLE] Initial chips (starting_stack) set from DOM: {self.tm.starting_stack}", flush=True)
                 return True
             else:
                 print("[TABLE] Buy-in dialog found but no confirm button.", flush=True)
@@ -343,7 +343,7 @@ class LifecycleManager:
         ]
         
         if self.tm.is_sitting and len(other_active_players) == 0:
-            now = asyncio.get_event_loop().time()
+            now = time.time()
             if self._empty_table_since is None:
                 self._empty_table_since = now
                 print(f"[TABLE] No other active players. Starting {self._SITOUT_LEAVE_DELAY}s grace period.", flush=True)
