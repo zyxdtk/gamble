@@ -183,7 +183,7 @@ if [ "$SKIP_INTERACTIVE" = false ]; then
     echo -e "  ${CYAN}[2]${NC} auto       - 自动模式"
     echo -e "  ${YELLOW}[3]${NC} apprentice - 学徒模式"
     echo ""
-    read -rp "  请输入模式 [1/2/3, 默认 1]: " mode_choice
+    read -rp "  请输入模式 [1/2/3, 默认 2]: " mode_choice
     case "$mode_choice" in
         2) MODE_FLAG="--mode auto" ; MODE_NAME="🤖 自动模式 (Auto)" ;;
         3) MODE_FLAG="--mode apprentice" ; MODE_NAME="📚 学徒模式 (Apprentice)" ; STRATEGY_FLAG="" ;;
@@ -217,7 +217,7 @@ if [ "$SKIP_INTERACTIVE" = false ]; then
         echo -e "  ${YELLOW}[3]${NC} 局数限制 (hands)"
         echo -e "  ${RED}[4]${NC} 时间限制 (minutes)"
         echo ""
-        read -rp "  请选择目标类型 [1-4, 默认 1]: " task_choice
+        read -rp "  请选择目标类型 [1-4, 默认 2]: " task_choice
         case "$task_choice" in
             2)
                 read -rp "  请输入盈利金额目标: " t_val
@@ -282,8 +282,7 @@ if [ -d "data/browser_data" ]; then
     # 有时清理这些文件能解决“个人资料”报错
 fi
 
-LOG_FILE="logs/poker_ai_$(date +%Y%m%d_%H%M%S).log"
-LOG_LATEST="logs/poker_ai.log"
+LOG_FILE="logs/poker_ai.log"
 CMD="python -m src.main $MODE_FLAG"
 [ -n "$STRATEGY_FLAG" ] && CMD="$CMD --strategy $STRATEGY_FLAG"
 [ -n "$TASK_FLAG" ] && CMD="$CMD $TASK_FLAG"
@@ -291,6 +290,13 @@ CMD="python -m src.main $MODE_FLAG"
 
 # 导出环境变量供直接策略读取 (兼容性)
 [ -n "$STRATEGY_FLAG" ] && export POKER_STRATEGY="$STRATEGY_FLAG"
+
+# 如果日志文件已存在，先备份一下
+if [ -f "$LOG_FILE" ]; then
+    BACKUP_FILE="logs/poker_ai_$(date +%Y%m%d_%H%M%S).log"
+    mv "$LOG_FILE" "$BACKUP_FILE"
+    echo -e "${YELLOW}📦 已备份旧日志到: ${CYAN}$BACKUP_FILE${NC}"
+fi
 
 echo ""
 echo -e "${GREEN}🚀 正在启动 Poker AI (nohup 后台模式)...${NC}"
@@ -301,8 +307,6 @@ echo ""
 nohup $CMD >> "$LOG_FILE" 2>&1 &
 POKER_PID=$!
 echo $POKER_PID > "$PID_FILE"
-# 建立软链接 logs/poker_ai.log 指向最新日志
-ln -sf "$(basename "$LOG_FILE")" "$LOG_LATEST"
 
 sleep 1
 if ps -p "$POKER_PID" > /dev/null 2>&1; then

@@ -397,7 +397,7 @@ class LifecycleManager:
             if navigate_to_lobby:
                 print("[TABLE] Navigating to lobby to find next table...", flush=True)
                 try:
-                    await self.tm.page.goto("https://www.casino.org/replaypoker/lobby/rings", timeout=30000)
+                    await self.tm.page.goto("https://www.casino.org/replaypoker/lobby/rings", wait_until="domcontentloaded", timeout=60000)
                     await asyncio.sleep(3)
                     print("[TABLE] Navigated to lobby.", flush=True)
                 except Exception as e:

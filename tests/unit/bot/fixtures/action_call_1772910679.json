@@ -1,0 +1,39 @@
+{
+  "name": "action_call",
+  "timestamp": 1772910679.531372,
+  "url": "https://www.casino.org/replaypoker/play/table/16504944",
+  "data": {
+    "pot": "5",
+    "seats": [
+      {
+        "index": 0
+      },
+      {
+        "index": 1
+      },
+      {
+        "index": 2
+      },
+      {
+        "index": 3
+      },
+      {
+        "index": 4
+      },
+      {
+        "index": 5
+      }
+    ],
+    "community_cards": [],
+    "buttons": {
+      "fold": {
+        "text": "Bardok48Fold1,012",
+        "visible": true
+      },
+      "call": {
+        "text": "Never top-up automatically",
+        "visible": true
+      }
+    }
+  }
+}

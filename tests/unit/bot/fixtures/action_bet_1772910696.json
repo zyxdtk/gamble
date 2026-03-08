@@ -1,0 +1,35 @@
+{
+  "name": "action_bet",
+  "timestamp": 1772910696.346346,
+  "url": "https://www.casino.org/replaypoker/play/table/16504944",
+  "data": {
+    "pot": "51",
+    "seats": [
+      {
+        "index": 0
+      },
+      {
+        "index": 1
+      },
+      {
+        "index": 2
+      },
+      {
+        "index": 3
+      },
+      {
+        "index": 4
+      },
+      {
+        "index": 5
+      }
+    ],
+    "community_cards": [],
+    "buttons": {
+      "bet": {
+        "text": "gcaduBet282",
+        "visible": true
+      }
+    }
+  }
+}

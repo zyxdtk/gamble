@@ -1,0 +1,29 @@
+{
+  "name": "initial",
+  "timestamp": 1772910671.9825711,
+  "url": "https://www.casino.org/replaypoker/play/table/16504944",
+  "data": {
+    "seats": [
+      {
+        "index": 0
+      },
+      {
+        "index": 1
+      },
+      {
+        "index": 2
+      },
+      {
+        "index": 3
+      },
+      {
+        "index": 4
+      },
+      {
+        "index": 5
+      }
+    ],
+    "community_cards": [],
+    "buttons": {}
+  }
+}

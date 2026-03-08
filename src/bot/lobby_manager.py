@@ -28,7 +28,7 @@ class LobbyManager:
         try:
             print("[LOBBY] Navigating to ring games lobby...", flush=True)
             # 实际域名为 casino.org/replaypoker（基于 explore_lobby.py 探索结果）
-            await self.page.goto("https://www.casino.org/replaypoker/lobby/rings", timeout=30000)
+            await self.page.goto("https://www.casino.org/replaypoker/lobby/rings", wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(3)
             await self.apply_filters()
         except Exception as e:

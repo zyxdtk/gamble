@@ -1,0 +1,43 @@
+{
+  "name": "action_raise",
+  "timestamp": 1772910716.676051,
+  "url": "https://www.casino.org/replaypoker/play/table/16504944",
+  "data": {
+    "pot": "7",
+    "seats": [
+      {
+        "index": 0
+      },
+      {
+        "index": 1
+      },
+      {
+        "index": 2
+      },
+      {
+        "index": 3
+      },
+      {
+        "index": 4
+      },
+      {
+        "index": 5
+      }
+    ],
+    "community_cards": [],
+    "buttons": {
+      "fold": {
+        "text": "Bardok48Fold1,012",
+        "visible": true
+      },
+      "check": {
+        "text": "a0z9b1y8x2c7Check248",
+        "visible": true
+      },
+      "raise": {
+        "text": "Raise to4",
+        "visible": true
+      }
+    }
+  }
+}

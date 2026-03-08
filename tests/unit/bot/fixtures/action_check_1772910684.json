@@ -1,0 +1,35 @@
+{
+  "name": "action_check",
+  "timestamp": 1772910684.0983732,
+  "url": "https://www.casino.org/replaypoker/play/table/16504944",
+  "data": {
+    "pot": "6",
+    "seats": [
+      {
+        "index": 0
+      },
+      {
+        "index": 1
+      },
+      {
+        "index": 2
+      },
+      {
+        "index": 3
+      },
+      {
+        "index": 4
+      },
+      {
+        "index": 5
+      }
+    ],
+    "community_cards": [],
+    "buttons": {
+      "check": {
+        "text": "giox777Check510",
+        "visible": true
+      }
+    }
+  }
+}

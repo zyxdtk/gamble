@@ -99,7 +99,8 @@ class BrowserManager:
         self.lobby_manager = LobbyManager(lobby_page)
 
         if lobby_page.url == "about:blank":
-            await lobby_page.goto("https://www.casino.org/replaypoker/lobby/rings")
+            print("[MANAGER] 导航到 Replay Poker 大厅...", flush=True)
+            await lobby_page.goto("https://www.casino.org/replaypoker/lobby/rings", wait_until="domcontentloaded", timeout=60000)
 
         print(f"BrowserManager initialized. Max tables: {self.max_tables}", flush=True)
 

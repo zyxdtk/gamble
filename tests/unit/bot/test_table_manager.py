@@ -617,3 +617,47 @@ class TestEndToEndFlow:
         
         assert plan1.primary_action == plan2.primary_action == plan3.primary_action, \
             "所有方法应该返回一致的动作"
+
+
+# ─── 使用真实 DOM 测试 ───────────────────────────────────────────────────────
+
+class TestPlayManagerWithRealDom:
+    """使用真实 DOM 测试 PlayManager 的解析能力。"""
+
+    def setup_method(self):
+        """加载 fixtures。"""
+        from .fixtures import FIXTURE_DIR
+        self.html_files = list(FIXTURE_DIR.glob("*.html"))
+        if not self.html_files:
+            pytest.skip("No HTML fixture files found")
+
+    def test_update_state_from_dom_with_real_html(self):
+        """测试用真实 HTML 更新状态。"""
+        from .fixtures import make_mock_page_from_html
+        from unittest.mock import patch
+
+        # 使用 action_raise 快照（有按钮）
+        html_file = next((f for f in self.html_files if "action_raise" in f.name), self.html_files[0])
+
+        page = make_mock_page_from_html(str(html_file))
+
+        with patch.object(TableManager, '_load_settings'):
+            tm = TableManager(page, strategy_type="gto")
+        tm.big_blind = 2
+        tm.is_sitting = True
+        tm.lifecycle_mgr._find_my_seat = AsyncMock(return_value=(None, None))
+
+        # 运行 update_state_from_dom
+        import asyncio
+        asyncio.run(tm.play_mgr.update_state_from_dom())
+
+        # 验证状态
+        print(f"\n从 {html_file.name} 解析:")
+        print(f"  pot: {tm.state.pot}")
+        print(f"  available_actions: {tm.state.available_actions}")
+        print(f"  to_call: {tm.state.to_call}")
+        print(f"  min_raise: {tm.state.min_raise}")
+
+        # 基本验证
+        assert tm.state.pot >= 0
+        assert tm.state.available_actions is not None
