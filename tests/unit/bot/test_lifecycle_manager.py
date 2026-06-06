@@ -19,8 +19,6 @@ class TestTrySitAndBuyin:
         tm.is_sitting = False
         tm.total_buyin = 0
         tm.settings = {"player": {"username": "TestPlayer"}}
-        tm.state = MagicMock()
-        tm.state.total_chips = 250  # 模拟已有筹码
         return tm
 
     def _create_mock_locator(self, count=0, is_visible=False, click_func=None):

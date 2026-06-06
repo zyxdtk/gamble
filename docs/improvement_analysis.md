@@ -17,9 +17,9 @@ task_manager.py       (400行) - 任务目标管理
 ```
 
 ### 1.3 测试状态
-- ✅ 83 passed (同步测试全部通过)
-- ❌ 1 failed (已修复)
-- ⏭️ 41 skipped (异步测试在当前环境运行有问题，建议单独调试)
+- ✅ 82 passed
+- ❌ 1 failed (`test_create_checkorfold_brain_returns_correct_type`)
+- ⏭️ 41 skipped (异步测试需要 pytest-asyncio)
 
 ---
 

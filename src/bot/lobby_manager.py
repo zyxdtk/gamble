@@ -5,9 +5,10 @@ class LobbyManager:
     Handles navigating the lobby and selecting tables.
     Does NOT manage the tabs, only returns Table URLs to join.
     """
-    def __init__(self, page):
+    def __init__(self, page, preferred_stakes: str = "1/2"):
         self.page = page
         self.is_navigating = False
+        self.preferred_stakes = preferred_stakes
 
     async def apply_filters(self):
         """Applies filters to the lobby (e.g. 1/2 stakes)."""
@@ -36,39 +37,67 @@ class LobbyManager:
         finally:
             self.is_navigating = False
 
-    async def get_best_table_url(self):
+    async def get_all_available_tables(self) -> list[str]:
         """
-        Scans the visible lobby and returns the URL of the best available table.
+        Scans the visible lobby and returns all available table URLs.
         Priority: seats-yellow (more players) > seats-green (fewer players).
-        Prefers tables with existing players for faster game start.
         """
         if "/lobby" not in self.page.url:
             await self.navigate_to_lobby()
 
+        urls = []
         try:
             await self.page.wait_for_selector("a[href*='/play/table/']", timeout=10000)
 
-            for seat_class in ["seats-green", "seats-yellow"]:
+            # 遍历不同类型的空位桌台
+            for seat_class in ["seats-yellow", "seats-green"]:
                 rows = self.page.locator(f".lobby-game:has(.{seat_class})")
                 count = await rows.count()
-                if count > 0:
-                    link = rows.first.locator("a[href*='/play/table/']").first
+                for i in range(count):
+                    row = rows.nth(i)
+                    
+                    # [FEATURE] 硬编码盲注过滤
+                    if self.preferred_stakes.strip():
+                        # 获取这行的所有文本，去除空格以兼容 "5/10" 或 "5 / 10" 的格式
+                        row_text = await row.text_content()
+                        if row_text:
+                            clean_text = row_text.replace(" ", "")
+                            target = self.preferred_stakes.strip().replace(" ", "")
+                            if target and target not in clean_text:
+                                continue
+                                
+                    link = row.locator("a[href*='/play/table/']").first
                     href = await link.get_attribute("href")
                     if href:
-                        if href.startswith("/"):
-                            href = f"https://www.casino.org{href}"
-                        print(f"[LOBBY] Found available table ({seat_class}): {href}", flush=True)
-                        return href
+                        url = f"https://www.casino.org{href}" if href.startswith("/") else href
+                        if url not in urls:
+                            urls.append(url)
 
-            link = self.page.locator("a[href*='/play/table/']").first
-            href = await link.get_attribute("href")
-            if href:
-                if href.startswith("/"):
-                    href = f"https://www.casino.org{href}"
-                return href
+            # 兜底：如果没找到带色的，尝试获取前 5 个任何桌子
+            if not urls:
+                all_links = self.page.locator("a[href*='/play/table/']")
+                count = await all_links.count()
+                for i in range(min(count, 5)):
+                    href = await all_links.nth(i).get_attribute("href")
+                    if href:
+                        url = f"https://www.casino.org{href}" if href.startswith("/") else href
+                        if url not in urls:
+                            urls.append(url)
+                            
+        except Exception as e:
+            print(f"[LOBBY] get_all_available_tables failed: {e}", flush=True)
+        return urls
+
+    async def get_best_table_url(self):
+        """
+        Legacy wrapper. Returns the first available table URL.
+        """
+        try:
+            urls = await self.get_all_available_tables()
+            return urls[0] if urls else None
         except Exception as e:
             print(f"[LOBBY] get_best_table_url failed: {e}", flush=True)
-        return None
+            return None
 
     async def open_table(self, url):
         """

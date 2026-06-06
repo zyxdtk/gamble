@@ -13,9 +13,11 @@ BrowserManager、LobbyManager、TableManager 都是 TaskManager 的工具。
 
 import asyncio
 import time
+import os
 from typing import Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
+from ..utils.logger import bot_logger
 
 
 class TaskType(Enum):
@@ -113,9 +115,9 @@ class TaskManager:
         """初始化工具"""
         from .browser_manager import BrowserManager
         
-        print("[TASK] Initializing task manager...")
-        print(f"[TASK] Type: {self.config.task_type.value}, Target: {self.config.target_value}")
-        print(f"[TASK] Strategy: {self.config.strategy}")
+        bot_logger.info("Initializing task manager...")
+        bot_logger.info(f"Task Type: {self.config.task_type.value}, Target: {self.config.target_value}")
+        bot_logger.info(f"Strategy: {self.config.strategy}")
         
         # 尽早设置策略环境变量
         import os
@@ -139,18 +141,16 @@ class TaskManager:
         
         await self.browser_mgr.start()
         
-        print("[TASK] Browser manager started successfully.")
+        bot_logger.info("Browser manager started successfully.")
         
     async def run(self):
         """运行任务主循环"""
         self.state.is_running = True
         self.state.start_time = time.time()
         
-        print(f"\n{'='*50}")
-        print(f"🚀 TASK STARTED: {self.config.task_type.value}")
-        print(f"   Target: {self.config.target_value}")
-        print(f"   Strategy: {self.config.strategy}")
-        print(f"{'='*50}\n")
+        bot_logger.info(f"🚀 TASK STARTED: {self.config.task_type.value}")
+        bot_logger.info(f"   Target: {self.config.target_value}")
+        bot_logger.info(f"   Strategy: {self.config.strategy}")
         
         try:
             while not self._stop_requested:
@@ -174,11 +174,10 @@ class TaskManager:
                 await asyncio.sleep(self._tick_interval)
                 
         except asyncio.CancelledError:
-            print("[TASK] Task cancelled.")
+            bot_logger.warning("Task cancelled.")
         except Exception as e:
-            print(f"[TASK] Error in task loop: {e}")
-            import traceback
-            traceback.print_exc()
+            bot_logger.error(f"Error in task loop: {e}")
+            bot_logger.exception(e)
         finally:
             await self._complete_task("stopped" if self._stop_requested else "completed")
             
@@ -197,7 +196,7 @@ class TaskManager:
         
         # 如果 run_tick 返回 False，表示没有可用桌子
         if result is False:
-            print("[TASK] No more available tables. Ending task.")
+            bot_logger.info("No more available tables. Ending task.")
             self.state.completion_reason = "No available tables"
             return False
             
@@ -231,7 +230,7 @@ class TaskManager:
                 self.on_table_changed(old_table, new_table_id)
                 
             if new_table_id:
-                print(f"[TASK] Switched to table: {new_table_id}")
+                bot_logger.info(f"Switched to table: {new_table_id}")
                 
     def _check_completion(self) -> bool:
         """检查任务是否完成"""
@@ -274,29 +273,26 @@ class TaskManager:
         if not self.state.completion_reason:
             self.state.completion_reason = reason
 
-        print(f"\n{'='*50}")
-        print(f"✅ TASK COMPLETED: {self.state.completion_reason}")
-        print(f"{'='*50}")
+        bot_logger.info(f"✅ TASK COMPLETED: {self.state.completion_reason}")
         self._print_statistics()
 
         # 保存任务报告
         try:
             self.save_report()
         except Exception as e:
-            print(f"[TASK] Failed to save report: {e}")
+            bot_logger.error(f"Failed to save report: {e}")
         
     def _print_statistics(self):
         """打印统计信息"""
         stats = self.state.to_dict()
-        print("\n  📊 TASK STATISTICS")
-        print("-" * 50)
-        print(f"  Duration: {stats['duration_seconds']:.1f} seconds")
-        print(f"  Tables played: {stats['total_tables']}")
-        print(f"  Hands played: {stats['total_hands']}")
-        print(f"  Cycles completed: {stats['total_cycles']}")
-        print(f"  Total buyin: {stats['total_buyin_added']}")
-        print(f"  Total profit: {stats['total_profit']}")
-        print("-" * 50)
+        bot_logger.info(
+            f"📊 TASK STATISTICS:\n"
+            f"  - Duration: {stats['duration_seconds']:.1f}s\n"
+            f"  - Tables: {stats['total_tables']}\n"
+            f"  - Hands: {stats['total_hands']}\n"
+            f"  - Cycles: {stats['total_cycles']}\n"
+            f"  - Profit: {stats['total_profit']}"
+        )
 
     def generate_report(self) -> dict:
         """
@@ -360,12 +356,12 @@ class TaskManager:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
 
-        print(f"[TASK] Report saved to: {filepath}")
+        bot_logger.info(f"Report saved to: {filepath}")
         return str(filepath)
         
     async def stop(self):
         """停止任务"""
-        print("[TASK] Stop requested.")
+        bot_logger.info("Stop requested.")
         self._stop_requested = True
         
         if self.browser_mgr:

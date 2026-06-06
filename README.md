@@ -1,137 +1,102 @@
 # Gamble - 德州扑克 AI 自动化系统
 
-本项目是一个专门针对 [ReplayPoker.com](https://www.replaypoker.com/) 的德州扑克 AI 自动化系统。通过 Playwright 自动化技术和多层次扑克决策引擎，实现自动入座、自动买入、自动决策以及动态盈亏离场。
+本项目是一个德州扑克 AI 自动化与仿真测试系统。通过 Playwright 自动化技术和多层次扑克决策引擎，实现全自动对局及离线仿真对抗。
+
+---
 
 ## 🚀 核心特性
 
-- **多策略决策引擎**: 支持 `range`（默认）、`gto`、`exploitative`、`checkorfold` 四种策略，由 `EngineManager` 动态加载。
-- **深度对手建模**: 基于 VPIP/PFR 统计、摊牌记录（Showdown）和贝叶斯范围更新，为每位对手维护独立的动态范围模型。
-- **范围感知决策（RangeBrain）**: 通过对手范围"紧凑度"动态修正跟注/加注阈值，面对 Nit 更保守，面对 Maniac 主动抓诈。
-- **策略化风险管理**: 基于 BB 倍数的止损/止盈阈值，支持自定义盈利目标（`--profit`）、局数（`--hands`）、时间（`--duration`）等任务类型。
-- **nohup 后台运行**: 改用 `nohup` 启动，关闭终端后进程继续运行，日志按时间戳自动保存至 `logs/` 目录。
+- **Brain (大脑) 决策系统**:
+  - 支持 `range`、`balanced` (原 `gto`)、`exploitative`、`checkorfold` 四种启发式策略。
+  - **[NEW]** 支持 `neural`: 基于 RLCard 与核心深度学习 (DQN) 的自进化模型。
+  - 完全逻辑解耦，通过 `BrainManager` 集成所有策略。
+- **Arena (竞技场) 仿真模式**:
+  - **离线模拟**: 无需浏览器即可运行万级对手的模拟赛。
+  - **AI 推理**: `neural` 策略支持加载真正的 `.pth` 模型权重进行对抗。
+  - **策略对抗**: 支持多策略、多玩家（如 Neural vs Balanced）的同台对抗与统计分析。
+- **深度对手建模**: 基于 VPIP/PFR 统计、摊牌记录（Showdown）为每位对手维护独立的动态模型。
 - **多种运行模式**:
-  - **自动模式** (`--mode auto`): 自动入座、买入并执行 AI 策略（默认）。
-  - **辅助模式** (`--mode assist`): 在终端显示决策建议，不实际点击。
-  - **学徒模式** (`--mode apprentice`): 观察并记录玩家操作。
+  - **仿真竞技场** (`--mode arena`): 进行本地仿真测试（最新功能）。
+  - **自动模式** (`--mode auto`): 在真实牌局中执行 AI 策略。
+  - **辅助模式** (`--mode assist`): 提供实时对局决策报告。
+  - **学徒模式** (`--mode apprentice`): 观察并记录玩家操作以供学习。
+
+---
 
 ## 📂 项目结构
 
 ```text
 gamble/
 ├── src/
+│   ├── brain/                   # 纯决策逻辑（原 engine）
+│   │   ├── brain_manager.py     # 策略管理与动态加载
+│   │   ├── strategies/          # 具体策略实现（GTO, Range, 等）
+│   │   └── player_analysis/     # 对手建模系统
 │   ├── bot/                     # 浏览器自动化与牌桌管理
-│   │   ├── browser_manager.py   # 浏览器生命周期管理
-│   │   ├── table_manager.py     # 牌桌协调器
-│   │   ├── play_manager.py      # 游戏状态解析与动作执行
-│   │   ├── lifecycle_manager.py # 入座/离场/买入逻辑
-│   │   └── task_manager.py      # 任务目标管理（盈利/局数/时间）
-│   ├── core/                    # 核心数据结构
-│   │   ├── game_state.py        # GameState / Player 数据类
-│   │   └── utils.py             # 通用工具函数
-│   ├── engine/                  # 决策引擎
-│   │   ├── brain_base.py        # Brain 抽象基类（集成 PlayerManager）
-│   │   ├── engine_manager.py    # 策略动态加载工厂（单例）
-│   │   ├── action_plan.py       # 决策结果数据类
-│   │   ├── strategies/          # 具体策略实现
-│   │   │   ├── range.py         # RangeBrain（默认策略，含对手紧凑度修正）
-│   │   │   ├── gto.py           # GTOBrain
-│   │   │   ├── exploitative.py  # ExploitativeBrain
-│   │   │   └── checkorfold.py   # CheckOrFoldBrain
-│   │   ├── player_analysis/     # 对手建模系统
-│   │   │   ├── tags.py          # PlayerTag 分类（NIT/TAG/FISH/STATION/MANIAC）
-│   │   │   ├── database.py      # SQLite 持久化（统计 + 摊牌记录）
-│   │   │   ├── manager.py       # PlayerManager 融合管理器
-│   │   │   ├── model.py         # BaseRangeModel / ActionBasedRangeModel
-│   │   │   ├── stats_model.py   # StatsAwareRangeModel（VPIP/PFR 修正）
-│   │   │   └── showdown_model.py# ShowdownAwareRangeModel（摊牌反馈修正）
-│   │   └── utils/               # 引擎工具库
-│   │       ├── equity_calculator.py  # 胜率计算（含听牌潜力）
-│   │       ├── board_analyzer.py     # 牌面湿度分析
-│   │       ├── preflop_range.py      # 翻牌前静态范围（PreflopRangeManager）
-│   │       └── position.py           # 位置码计算 / 手牌规范化
-│   └── main.py                  # 系统入口（argparse CLI）
-├── tests/unit/                  # 单元测试（139+ 项，全部通过）
-├── config/
-│   └── settings.yaml            # 全局参数配置
-├── data/                        # 运行数据（浏览器 Session、SQLite 数据库）
-├── logs/                        # 运行日志（按时间戳命名）
-└── start.sh                     # 一键启动脚本
+│   ├── arena/                   # 仿真系统（模拟牌桌、发牌、结算）
+│   └── main.py                  # 系统入口
+├── docs/                        # 全局设计方案、任务列表及核心逻辑 (brain.md)
+├── tests/                       # 单元测试与集成测试
+│   ├── unit/                    # 核心组件测试
+│   └── arena/                   # 竞技场规则测试
+├── config/                      # 策略与游戏参数配置
+├── data/                        # 统计数据库与 Session 数据
+└── logs/                        # 运行日志
 ```
+
+---
 
 ## 🛠️ 安装与运行
 
-### 环境准备
-
+### 1. 环境准备
 ```bash
 uv sync
 playwright install chrome
 ```
 
-### 快速启动（推荐）
-
+### 2. 运行仿真竞技场 (Arena)
+用于测试策略强度，查看 P/L 和 VPIP 等数据：
 ```bash
-./start.sh
+# 运行 100 手牌，默认策略对抗
+uv run python src/main.py --mode arena --arena-hands 100
+
+# 自定义玩家策略对抗 (Neural vs Balanced)
+uv run python src/main.py --mode arena --arena-players neural,balanced,range,exploitative --arena-hands 100
+
+### 3. 训练神经网络模型 (Offline Training)
+如果你想训练自己的 `neural` 策略模型：
+```bash
+# 运行 DQN 强化学习训练循环 (默认 1000 回合)
+uv run python scripts/train_nlh_model.py
+```
+训练完成后，权重将自动保存至 `data/models/nlh_dqn.pth`，`neural` 策略在下次运行时会自动加载。
 ```
 
-默认配置：**自动模式 + Range 策略 + 盈利目标 2000**，按提示确认后以 `nohup` 后台启动。
-
+### 3. 运行自动/辅助模式
 ```bash
-# 手动配置模式
-./start.sh --interactive
+# 自动模式
+uv run python src/main.py --mode auto --strategy aggressive --profit 100
 
-# 查看实时日志
-tail -f logs/poker_ai.log
+# 辅助模式
+uv run python src/main.py --mode assist --strategy aggressive
 ```
 
-### 命令行直接启动
-
-```bash
-# 自动模式 + range 策略 + 盈利目标 1000
-python -m src.main --mode auto --strategy range --profit 1000
-
-# 自动模式 + GTO 策略 + 运行 50 手
-python -m src.main --mode auto --strategy gto --hands 50
-
-# 辅助模式（仅提供决策建议，不实际操作）
-python -m src.main --mode assist --strategy range
-```
+---
 
 ## 🧪 测试说明
-
 ```bash
-# 运行所有单元测试
-pytest tests/unit/ -v
+# 运行所有验证测试
+uv run pytest tests/ -v
 
-# 只运行策略测试
-pytest tests/unit/engine/strategies/ -v
-
-# 只运行对手建模测试
-pytest tests/unit/engine/player_analysis/ -v
+# 运行竞技场专用测试
+uv run pytest tests/arena/ -v
 ```
 
-## ⚙️ 配置说明 (config/settings.yaml)
+---
 
-```yaml
-game:
-  preferred_stakes: "1/2"    # 偏好的盲注级别
-
-exit_thresholds:
-  stop_loss_bb: 100          # 亏损 100 BB 离场
-  take_profit_bb: 300        # 盈利 300 BB 离场
-  low_chips_bb: 10           # 桌上筹码低于 10 BB 离场
-
-strategy:
-  thinking_timeout: 2.0      # AI 思考超时时间（秒）
-```
-
-## 📖 策略说明
-
-| 策略 | 说明 |
-|------|------|
-| `range` | **默认策略**。基于 EHS + 对手范围紧凑度的多维决策，智能区分 Nit/Maniac/诈唬者 |
-| `gto` | 基于翻牌前范围表的近似 GTO 策略 |
-| `exploitative` | 读取对手风格（PlayerTag）进行针对性剥削 |
-| `checkorfold` | 最保守策略，仅在免费时过牌，否则弃牌 |
+## 📖 核心文档
+- [**Brain 核心逻辑**](src/brain/brain.md): 详细记录了各策略的思考分支与阀值定义。
+- [**项目规则 (Rules)**](.agents/rules/global.md): 本项目的代码与文档规范说明。
 
 ---
 *注：本项目仅用于技术研究与学习测试目的。*

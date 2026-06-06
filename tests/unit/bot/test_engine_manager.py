@@ -68,7 +68,7 @@ class TestEngineManagerCreateBrain:
         assert isinstance(brain, GTOBrain)
 
     def test_create_checkorfold_brain_returns_correct_type(self):
-        from src.engine.strategies.check_or_fold import CheckOrFoldBrain
+        from src.engine.strategies.checkorfold import CheckOrFoldBrain
         e = self._fresh_engine()
         brain = e.create_brain("table_003", "checkorfold")
         assert isinstance(brain, CheckOrFoldBrain)

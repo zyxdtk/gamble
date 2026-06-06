@@ -1,0 +1,301 @@
+"""
+WebSocket 状态监听器
+用于从 ReplayPoker 的 WebSocket 消息中提取游戏状态
+这是 src/platforms/browser 的核心组件，供所有上层调用
+"""
+import asyncio
+import json
+import re
+from typing import Dict, Any, Optional, Set
+from playwright.async_api import Page
+from src.utils.logger import bot_logger
+
+
+class WebSocketListener:
+    """
+    轻量级 WebSocket 监听器
+    不依赖 TableManager，独立运行
+    作为 src/platforms/browser 的标准组件
+    """
+    
+    def __init__(self, page: Page):
+        self.page = page
+        self.state: Dict[str, Any] = {
+            "pot": 0,
+            "community_cards": [],
+            "hole_cards": [],
+            "my_seat_id": None,
+            "my_user_id": None,
+            "active_seat": None,
+            "is_my_turn": False,
+            "to_call": 0,
+            "min_raise": 0,
+            "players": {},
+            "current_stage": "",
+            "hand_id": 0,
+            "big_blind": 0,
+        }
+        
+        self._processed_hashes: Set[int] = set()
+        self._max_cache_size = 100
+        self._last_ws_time = 0
+        self._is_listening = False
+        self._registered_ws_ids: Set[int] = set()
+    
+    async def start_listening(self):
+        """启动 WebSocket 监听"""
+        if self._is_listening:
+            return
+        
+        self._is_listening = True
+        self.page.on("websocket", self._on_websocket)
+        bot_logger.info("✅ WebSocket listener started")
+    
+    def stop_listening(self):
+        """停止 WebSocket 监听"""
+        self._is_listening = False
+        bot_logger.info("⏹️ WebSocket listener stopped")
+    
+    def _on_websocket(self, ws):
+        """注册 WebSocket 事件处理器"""
+        ws_id = id(ws)
+        if ws_id in self._registered_ws_ids:
+            return
+        self._registered_ws_ids.add(ws_id)
+        ws.on("framereceived", self._handle_ws_frame)
+    
+    async def _handle_ws_frame(self, frame):
+        """处理 WebSocket 帧"""
+        try:
+            import time
+            self._last_ws_time = time.time()
+            
+            payload = frame.text if hasattr(frame, 'text') else str(frame)
+            if not payload.startswith("["):
+                return
+            
+            data = json.loads(payload)
+            if len(data) < 5 or data[3] != "output":
+                return
+            
+            await self._process_game_message(data[4])
+        except Exception as e:
+            bot_logger.debug(f"WS frame processing error: {e}")
+    
+    async def _process_game_message(self, data: Dict):
+        """处理游戏状态消息"""
+        if not isinstance(data, dict):
+            return
+        
+        # 去重：使用全量内容哈希
+        data_str = json.dumps(data, sort_keys=True)
+        msg_hash = hash(data_str)
+        
+        if msg_hash in self._processed_hashes:
+            return
+        self._processed_hashes.add(msg_hash)
+        
+        if len(self._processed_hashes) > self._max_cache_size:
+            self._processed_hashes = set(list(self._processed_hashes)[-self._max_cache_size//2:])
+        
+        updates = data.get("updates", [])
+        
+        # 优先级排序：startHand 先于 dealHoleCards
+        def get_priority(u):
+            act = u.get("action", "")
+            if act == "startHand":
+                return 0
+            if act == "dealHoleCards":
+                return 1
+            return 2
+        
+        sorted_updates = sorted(updates, key=get_priority)
+        
+        for update in sorted_updates:
+            await self._apply_update(update)
+    
+    async def _apply_update(self, update: Dict):
+        """应用单个更新"""
+        action = update.get("action")
+        
+        # --- 1. 全量状态同步 ---
+        if "players" in update:
+            self._update_players(update.get("players", []))
+        
+        if "communityCards" in update:
+            c_cards = update.get("communityCards", [])
+            if isinstance(c_cards, list) and len(c_cards) >= len(self.state["community_cards"]):
+                if c_cards != self.state["community_cards"]:
+                    self.state["community_cards"] = c_cards
+                    bot_logger.debug(f"WS: Community Cards updated: {c_cards}")
+        
+        if "pot" in update:
+            new_pot = update.get("pot")
+            if new_pot is not None:
+                self.state["pot"] = new_pot
+        
+        if not action:
+            return
+        
+        # --- 2. 行为动作逻辑 ---
+        bot_logger.debug(f"WS Action: {action}")
+        
+        # 发底牌 - 关键：自动识别自己的座位
+        if action in ["deal", "dealCards", "dealHoldCards", "dealHoleCards"]:
+            await self._handle_deal_hole_cards(update)
+        
+        elif action == "dealCommunityCards":
+            cards = update.get("cards")
+            if isinstance(cards, list) and len(cards) > 0:
+                self.state["community_cards"] = cards
+                bot_logger.info(f"WS: Received Community Cards: {cards}")
+        
+        elif action in ["updatePots", "awardPot"]:
+            pots = update.get("pots", [])
+            self.state["pot"] = sum(p.get("chips", 0) for p in pots)
+            if action == "awardPot":
+                # 手牌结束，重置部分状态
+                self.state["community_cards"] = []
+                self.state["pot"] = 0
+        
+        elif action == "startHand":
+            # 新手牌开始
+            self.state["hand_id"] = update.get("id", 0)
+            if "dealerSeat" in update:
+                self.state["dealer_seat"] = update.get("dealerSeat")
+            bot_logger.info(f"WS: New hand started (ID: {self.state['hand_id']})")
+        
+        elif action == "blinds":
+            self.state["big_blind"] = update.get("minimumRaise", self.state["big_blind"])
+        
+        elif action in ["tick", "setActivePlayer"]:
+            # 当前行动者
+            current_player = update.get("currentPlayer") or update
+            seat = current_player.get("seatId") or current_player.get("seat")
+            if seat is not None:
+                self.state["active_seat"] = seat
+                
+                # 判断是否轮到我
+                if self.state["my_seat_id"] is not None:
+                    self.state["is_my_turn"] = (seat == self.state["my_seat_id"])
+                
+                # 更新玩家的 is_acting 标志
+                for s, player in self.state["players"].items():
+                    player["is_acting"] = (s == seat)
+                
+                # 保存游戏阶段
+                ws_state = update.get("state", "")
+                if ws_state:
+                    self.state["current_stage"] = ws_state.lower()
+    
+    async def _handle_deal_hole_cards(self, update: Dict):
+        """处理发底牌消息，自动识别自己的座位"""
+        cards_in_update = update.get("cards", [])
+        bot_logger.debug(f"WS dealHoleCards: my_seat={self.state['my_seat_id']}, cards={cards_in_update}")
+        
+        for p in update.get("players", []):
+            p_cards = p.get("cards")
+            seat = p.get("seat") or p.get("seatId")
+            user_id = p.get("userId")
+            
+            if p_cards and len(p_cards) == 2:
+                is_my_cards = False
+                
+                # ⭐ 启发式识别：如果看到非 'X' 的底牌，那一定是我们的位置
+                if "X" not in p_cards:
+                    is_my_cards = True
+                    if self.state["my_seat_id"] != seat:
+                        self.state["my_seat_id"] = seat
+                        self.state["my_user_id"] = user_id
+                        bot_logger.info(f"🎯 WS: Auto-detected identity from cards: seat={seat}, userId={user_id}")
+                
+                elif self.state["my_user_id"] and str(user_id) == str(self.state["my_user_id"]):
+                    is_my_cards = True
+                    self.state["my_seat_id"] = seat
+                
+                elif seat == self.state["my_seat_id"]:
+                    is_my_cards = True
+                
+                if is_my_cards:
+                    self.state["hole_cards"] = p_cards
+                    bot_logger.info(f"WS: My Hole Cards: {p_cards} (Seat: {seat})")
+                
+                # 更新玩家卡片
+                if seat is not None:
+                    if seat not in self.state["players"]:
+                        self.state["players"][seat] = {
+                            "seat_id": seat,
+                            "name": "",
+                            "chips": 0,
+                            "cards": [],
+                            "is_acting": False,
+                            "status": "active",
+                        }
+                    self.state["players"][seat]["cards"] = p_cards
+    
+    def _update_players(self, players_data: list):
+        """更新玩家信息"""
+        for p_data in players_data:
+            seat = p_data.get("seat") or p_data.get("seatId")
+            if seat is None:
+                continue
+            
+            if seat not in self.state["players"]:
+                self.state["players"][seat] = {
+                    "seat_id": seat,
+                    "name": "",
+                    "chips": 0,
+                    "cards": [],
+                    "is_acting": False,
+                    "status": "active",
+                }
+            
+            p = self.state["players"][seat]
+            
+            if "name" in p_data:
+                p["name"] = p_data["name"]
+            
+            if "chips" in p_data or "stack" in p_data:
+                p["chips"] = p_data.get("chips", p_data.get("stack", p["chips"]))
+                # 如果是我的座位，同步总筹码
+                if seat == self.state["my_seat_id"]:
+                    pass  # CLI 可能还没初始化 total_chips
+            
+            # 更新状态
+            raw_status = p_data.get("status") or p_data.get("state", "")
+            if raw_status:
+                if raw_status in ["sitOut", "sit_out"]:
+                    p["status"] = "sit_out"
+                elif raw_status in ["fold", "folded"]:
+                    p["status"] = "folded"
+                else:
+                    p["status"] = "active"
+            
+            # 使用 userId 匹配自己的座位
+            user_id = p_data.get("userId")
+            if self.state["my_user_id"] and str(user_id) == str(self.state["my_user_id"]):
+                if self.state["my_seat_id"] != seat:
+                    self.state["my_seat_id"] = seat
+                    bot_logger.info(f"WS: Updated my_seat_id to {seat} (matched userId)")
+    
+    def get_state(self) -> Dict[str, Any]:
+        """获取当前状态副本"""
+        return self.state.copy()
+    
+    def is_healthy(self) -> bool:
+        """检查 WebSocket 是否健康（最近 45 秒有消息）"""
+        import time
+        if self._last_ws_time == 0:
+            return False
+        elapsed = time.time() - self._last_ws_time
+        return elapsed < 45
+    
+    def reset_for_new_hand(self):
+        """为新手牌重置状态"""
+        self.state["hole_cards"] = []
+        self.state["community_cards"] = []
+        self.state["pot"] = 0
+        self.state["to_call"] = 0
+        self.state["min_raise"] = 0
+        self.state["is_my_turn"] = False
+        bot_logger.debug("WS: State reset for new hand")

@@ -1,8 +1,8 @@
-from __future__ import annotations
 import asyncio
 import re
-from ..core.utils import human_delay
-from ..engine.engine_manager import EngineManager
+from .utils import human_delay
+from ..brain.brain_manager import BrainManager
+from ..utils.logger import bot_logger
 
 
 class PlayManager:
@@ -10,30 +10,30 @@ class PlayManager:
     
     def __init__(self, table_manager):
         self.tm = table_manager
-        self.engine_mgr = EngineManager()
+        self.brain_mgr = BrainManager()
         self._brain_created = False
     
     def ensure_brain_exists(self, strategy_type: str) -> None:
         if not self._brain_created:
             table_id = str(id(self.tm))
-            self.engine_mgr.create_brain(table_id, strategy_type)
+            self.brain_mgr.create_brain(table_id, strategy_type)
             self._brain_created = True
     
     def update_brain_state(self) -> None:
         table_id = str(id(self.tm))
-        self.engine_mgr.update_brain(table_id, self.tm.state)
+        self.brain_mgr.update_brain(table_id, "state_update", {"state": self.tm.state})
     
     def request_decision(self) -> dict | None:
         table_id = str(id(self.tm))
-        return self.engine_mgr.get_decision(table_id, self.tm.state)
+        return self.brain_mgr.get_decision(table_id, self.tm.state)
     
     def reset_brain(self) -> None:
         table_id = str(id(self.tm))
-        self.engine_mgr.reset_brain(table_id)
+        self.brain_mgr.reset_brain(table_id)
     
     def remove_brain(self) -> None:
         table_id = str(id(self.tm))
-        self.engine_mgr.remove_brain(table_id)
+        self.brain_mgr.remove_brain(table_id)
         self._brain_created = False
         
     async def update_state_from_dom(self):
@@ -61,10 +61,23 @@ class PlayManager:
                         self.tm.state.total_chips = int(val)
                         if self.tm.starting_stack is None:
                             self.tm.starting_stack = self.tm.state.total_chips
-                            print(f"[TEST] 初始起始筹码: {self.tm.starting_stack}", flush=True)
+                            bot_logger.info(f"初始起始筹码: {self.tm.starting_stack}")
 
             buttons = await self.find_action_buttons()
             self.tm.state.available_actions = list(buttons.keys())
+
+            # [FIX] 如果找到操作按钮，说明轮到我行动
+            if buttons and self.tm.state.my_seat_id is not None:
+                my_player = self.tm.state.players.get(self.tm.state.my_seat_id)
+                if my_player:
+                    my_player.is_acting = True
+                    self.tm.state.active_seat = self.tm.state.my_seat_id
+            elif not buttons:
+                # [FIX] 如果没有可用按钮，确保清除 acting 状态
+                if self.tm.state.my_seat_id is not None:
+                    my_player = self.tm.state.players.get(self.tm.state.my_seat_id)
+                    if my_player:
+                        my_player.is_acting = False
 
             # 提取 to_call (跟注金额)
             self.tm.state.to_call = 0
@@ -74,7 +87,7 @@ class PlayManager:
                 digits = re.sub(r"[^\d]", "", label)
                 if digits:
                     self.tm.state.to_call = int(digits)
-                    print(f"[TEST] Detected to_call: {self.tm.state.to_call}", flush=True)
+                    bot_logger.debug(f"Detected to_call: {self.tm.state.to_call}")
 
             self.tm.state.min_raise = 0
             if "raise" in buttons or "bet" in buttons:
@@ -113,12 +126,12 @@ class PlayManager:
                             parsed = self._parse_stakes_string(text)
                             if parsed > 0:
                                 self.tm.big_blind = parsed
-                                print(f"[TABLE] Big blind detected: {parsed} from '{text}'", flush=True)
+                                bot_logger.info(f"Big blind detected: {parsed} from '{text}'")
                                 return
                 except Exception:
                     continue
         except Exception as e:
-            print(f"[TABLE] Error detecting big blind: {e}", flush=True)
+            bot_logger.error(f"Error detecting big blind: {e}")
 
     def _parse_stakes_string(self, text: str) -> int:
         if not text:
@@ -164,32 +177,41 @@ class PlayManager:
 
         self.tm._last_dealer_seat = seat
         
-        if len(self.tm._unique_seats_this_cycle) > 0 and seat in self.tm._unique_seats_this_cycle:
+        if len(self.tm._unique_seats_this_cycle) >= 2 and seat in self.tm._unique_seats_this_cycle:
             self.tm.dealer_cycle_count += 1
-            print(
-                f"[CYCLE] ✅ 完成第 {self.tm.dealer_cycle_count} 圈！"
+            bot_logger.info(
+                f"✅ 完成第 {self.tm.dealer_cycle_count} 圈！"
                 f"共玩 {self.tm.hands_played} 手，"
-                f"本圈座位: {sorted(self.tm._unique_seats_this_cycle)}",
-                flush=True
+                f"本圈座位: {sorted(self.tm._unique_seats_this_cycle)}"
             )
             self.tm._unique_seats_this_cycle = {seat}
         else:
             if not self.tm._unique_seats_this_cycle:
-                print(f"[CYCLE] 庄家起始位: {seat}，开始记录周期。", flush=True)
+                bot_logger.info(f"庄家起始位: {seat}，开始记录周期。")
             self.tm._unique_seats_this_cycle.add(seat)
 
     async def find_action_buttons(self):
         buttons = {}
         if self.tm.is_closed:
             return buttons
-        targets = ["Fold", "Call", "Check", "Raise", "Bet", "All In"]
-        try:
-            for text in targets:
-                locator = self.tm.page.get_by_role("button", name=re.compile(f"^{text}", re.I))
-                if await locator.count() > 0 and await locator.first.is_visible():
-                    buttons[text.lower()] = locator.first
-        except Exception:
-            pass
+        # 修改匹配项：All In 可能带有空格或连字符
+        targets = ["Fold", "Call", "Check", "Raise", "Bet", ("All In", "All[ -]?In")]
+        for item in targets:
+            try:
+                if isinstance(item, tuple):
+                    name, pattern = item
+                else:
+                    name, pattern = item, f"^{item}"
+                
+                locator = self.tm.page.get_by_role("button", name=re.compile(pattern, re.I))
+                count = await locator.count()
+                if count > 0:
+                    first = locator.first
+                    if await first.is_visible():
+                        buttons[name.lower()] = first
+            except Exception as e:
+                bot_logger.debug(f"查找按钮 {name} 时出错: {e}")
+                continue
         return buttons
 
     async def perform_click(self, action_text: str, amount: int = 0, bet_size_hint: str | None = None):
@@ -203,17 +225,55 @@ class PlayManager:
             if choice == "fold": 
                 target = buttons.get("fold")
             elif choice in ["check", "call"]: 
-                target = buttons.get("check") or buttons.get("call")
+                # [FIX] 如果需要 Call 但按钮显示为 All In（筹码不足时），也应支持
+                target = buttons.get("check") or buttons.get("call") or buttons.get("all in")
             elif choice in ["raise", "bet", "all-in", "all_in"]:
                 target = buttons.get("bet") or buttons.get("raise") or buttons.get("all in")
                 is_raise = True
             
             if target:
-                await target.click()
-                # 点击 Raise/Bet 后，尝试设置加注金额
                 if is_raise:
-                    await asyncio.sleep(0.4)
-                    await self.set_raise_amount(amount=amount, bet_size_hint=bet_size_hint, pot=self.tm.state.pot)
+                    # [FIX] Replay Poker 的正确流程：先设置金额（控件与按钮同时可见），再点击 Raise/Bet 提交
+                    # 不能先点击按钮：点击 Bet/Raise 会直接以最小加注提交
+                    amount_set = await self.set_raise_amount(amount=amount, bet_size_hint=bet_size_hint, pot=self.tm.state.pot)
+                    if not amount_set:
+                        bot_logger.warning("未能设置加注金额，仍然提交（将以最小加注执行）")
+                    # [FIX] 设置金额后，按钮可能变成 All In，需要重新查找
+                    await asyncio.sleep(0.3)
+                    buttons = await self.find_action_buttons()
+                    target = buttons.get("bet") or buttons.get("raise") or buttons.get("all in")
+                    if not target:
+                        bot_logger.error("设置金额后找不到提交按钮")
+                        return False
+                    # [FIX] 尝试点击可用的按钮，如果 Raise 不可用则尝试 All In
+                    try:
+                        # 先检查当前 target 是否 enabled
+                        is_enabled = await target.is_enabled()
+                        if not is_enabled:
+                            # 尝试 All In 按钮
+                            all_in_btn = buttons.get("all in")
+                            if all_in_btn:
+                                is_all_in_enabled = await all_in_btn.is_enabled()
+                                if is_all_in_enabled:
+                                    bot_logger.info("Raise 按钮不可用，切换到 All In")
+                                    target = all_in_btn
+                                else:
+                                    bot_logger.warning("Raise 和 All In 按钮都不可用")
+                                    return False
+                            else:
+                                bot_logger.warning("Raise 按钮不可用且找不到 All In")
+                                return False
+                        await target.click(timeout=5000)
+                    except Exception as e:
+                        bot_logger.warning(f"点击按钮失败（可能已超时自动fold）: {e}")
+                        return False
+                else:
+                    try:
+                        await target.click(timeout=5000)
+                    except Exception as e:
+                        bot_logger.warning(f"点击按钮失败（可能已超时自动fold）: {e}")
+                        return False
+
                 return True
         return False
 
@@ -248,75 +308,95 @@ class PlayManager:
                 bet_size_hint = "half_pot"
             else:
                 bet_size_hint = "min"
-            print(f"[ACTION] 自动推断加注档位: {bet_size_hint} (amount={amount}, pot={pot}, ratio={ratio:.2f})", flush=True)
+            bot_logger.info(f"自动推断加注档位: {bet_size_hint} (amount={amount}, pot={pot}, ratio={ratio:.2f})")
         
-        # 2. 尝试点击对应的快捷按钮
+        # 1. 尝试点击对应的快捷按钮
         if bet_size_hint and bet_size_hint in PRESET_BUTTONS:
+            # [ADD] 优先使用根据实战探测得到的精确 CSS 类名
+            class_map = {
+                "min": ".Preset--min",
+                "half_pot": ".Preset--half",
+                "pot": ".Preset--pot",
+                "max": ".Preset--max"
+            }
+            if bet_size_hint in class_map:
+                try:
+                    p_btn = page.locator(class_map[bet_size_hint]).first
+                    if await p_btn.count() > 0 and await p_btn.is_visible():
+                        await p_btn.click()
+                        bot_logger.info(f"✅ 通过精确类名点击快捷按钮 [{class_map[bet_size_hint]}]")
+                        return True
+                except Exception:
+                    pass
+
+            # [RETAIN] 备选：文本匹配逻辑 (保留原有灵活性)
             labels = PRESET_BUTTONS[bet_size_hint]
-            print(f"[ACTION] 尝试匹配快捷按钮: {bet_size_hint} (Candidate labels: {labels})", flush=True)
-            
             for label in labels:
                 try:
-                    # 组合多种定位策略：文本匹配、正则匹配、以及常见类名匹配
+                    # 使用 Playwright 推荐的 get_by_role 配合正则
+                    btn = page.get_by_role("button", name=re.compile(f".*{label}.*", re.I)).first
+                    if await btn.count() > 0 and await btn.is_visible():
+                        await asyncio.sleep(0.1)
+                        await btn.click()
+                        bot_logger.info(f"✅ 通过 get_by_role 点击快捷按钮 [{label}] ({bet_size_hint})")
+                        return True
+                        
+                    # 备选：传统的 has-text 选择器
                     selectors = [
                         f"button:has-text('{label}')",
                         f".m-bet-controls__preset:has-text('{label}')",
                         f".m-btn:has-text('{label}')",
                         f"[role='button']:has-text('{label}')",
                         f"div[class*='preset']:has-text('{label}')",
-                        f"span:has-text('{label}')",
                     ]
                     
                     for selector in selectors:
                         el = page.locator(selector).first
                         if await el.count() > 0 and await el.is_visible():
-                            # 在点击前稍微等待，确保 UI 已响应
                             await asyncio.sleep(0.1)
                             await el.click()
-                            print(f"[ACTION] ✅ 点击快捷按钮 [{label}] 设置加注尺度 ({bet_size_hint})", flush=True)
+                            bot_logger.info(f"✅ 通过 selector 点击快捷按钮 [{label}] ({bet_size_hint})")
                             return True
-                except Exception as e:
+                except Exception:
                     continue
-            print(f"[ACTION] ⚠️ 未找到快捷按钮 ({bet_size_hint})，降级为 input 输入", flush=True)
+        bot_logger.warning(f"未找到快捷按钮 ({bet_size_hint})，降级为 input 输入")
         
         # 3. 兜底：直接往 input 框填数字
         if amount <= 0:
             return False
             
-        print(f"[ACTION] 尝试通过 input 输入金额: {amount}...", flush=True)
+        bot_logger.info(f"尝试通过 input 输入金额: {amount}...")
         
-        # 增加多种输入框选择器，包含 ReplayPoker 常见的类名
+        # Replay Poker 的金额输入框结构：
         number_selectors = [
-            "input.m-bet-input__input",
-            "input.m-bet-field__input",
-            ".m-bet-input input",
-            ".m-bet-controls input",
+            ".BettingControls input",                       # [NEW] 实战探测最速选择器
+            "input.NumberInput__input",                     # 常见类名
+            ".NumberInput input",                           # 组件结构
+            "input[inputmode='numeric']",                   # 属性特征
+            "input[type='text'][pattern='[0-9]*']",         # 属性特征
+            ".BettingControls [class*='input']",
+            ".RaiseControls input",
+            ".BetSlider input",
             "input[type='number']",
-            "input[type='text'][pattern='[0-9]*']",
-            "input[class*='input']",
         ]
         
-        for sel in number_selectors:
-            try:
-                # 显式等待输入框出现（缩短超时时间防止卡死）
-                el = page.locator(sel).first
-                if await el.count() == 0:
+        # 先等待最多 2s，让控件渲染完成
+        for _ in range(4):
+            for sel in number_selectors:
+                try:
+                    el = page.locator(sel).first
+                    if await el.count() > 0 and await el.is_visible():
+                        # 清空并输入金额
+                        await el.click(click_count=3)
+                        await page.keyboard.press("Control+a")
+                        await el.fill(str(amount))
+                        await asyncio.sleep(0.3)
+                        await el.press("Enter")
+                        bot_logger.info(f"✅ input 成功设置金额: {amount} (selector: {sel})")
+                        return True
+                except Exception:
                     continue
-                
-                await el.wait_for(state="visible", timeout=1500)
-                
-                # 清理并输入
-                await el.click(click_count=3)
-                await page.keyboard.press("Backspace")
-                await el.fill(str(amount))
-                await asyncio.sleep(0.3)
-                
-                # 模拟按下 Enter 确认金额
-                await el.press("Enter")
-                print(f"[ACTION] ✅ input 成功设置金额: {amount} (selector: {sel})", flush=True)
-                return True
-            except Exception:
-                continue
+            await asyncio.sleep(0.5)
         
-        print(f"[ACTION] ⚠️ 未找到任何金额控件，使用默认最小加注 (期望: {amount})", flush=True)
+        bot_logger.warning(f"未找到任何金额控件，使用默认最小加注 (期望: {amount})")
         return False

@@ -11,6 +11,6 @@
 ## 3. 项目结构 / Project Structure
 - **代码**: `src`
 - **测试**: `tests`
-- **文档**: `docs` (Default location for design proposals, tasks, and plans)
+- **文档**: `docs` (全局文档、设计方案与任务列表); 模块相关文档存放在各模块目录下。
 - **配置**: `config`
 - **数据**: `data`

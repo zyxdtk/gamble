@@ -6,6 +6,7 @@ import yaml
 from playwright.async_api import async_playwright
 from .lobby_manager import LobbyManager
 from .table_manager import TableManager
+from ..utils.logger import bot_logger
 
 
 class BrowserManager:
@@ -31,8 +32,8 @@ class BrowserManager:
         self.max_cycles = self._get_env_int("POKER_MAX_CYCLES", None)
         self.max_duration_min = self._get_env_int("POKER_MAX_DURATION_MIN", None)
 
-        # 已访问的桌子记录（避免重复进入）
-        self._visited_tables: set = set()
+        # 已访问的桌子记录（仅保留最近 5 张以防锁死，FIFO 队列）
+        self._visited_tables: list[str] = []
 
         # 累计统计（包含已关闭的桌子）
         self._accumulated_stats = {
@@ -61,8 +62,9 @@ class BrowserManager:
                 config = yaml.safe_load(f)
                 self.max_tables = config.get("game", {}).get("max_tables", 1)
                 self.preferred_strategy = config.get("strategy", {}).get("type", "gto")
+                self.preferred_stakes = config.get("game", {}).get("preferred_stakes", "1/2")
         except Exception:
-            pass
+            self.preferred_stakes = "1/2"
         env_strategy = os.environ.get("POKER_STRATEGY", "").strip()
         if env_strategy:
             self.preferred_strategy = env_strategy
@@ -77,32 +79,32 @@ class BrowserManager:
         return self.preferred_strategy
 
     async def start(self):
-        print("Starting BrowserManager...", flush=True)
+        bot_logger.info("你好，同学！正在启动浏览器管理器...")
         self.playwright = await async_playwright().start()
-        print("[MANAGER] Playwright started.", flush=True)
+        bot_logger.info("Playwright 引擎已启动。")
 
         user_data_dir = "./data/browser_data"
         os.makedirs(user_data_dir, exist_ok=True)
 
-        print(f"[MANAGER] Launching browser with {user_data_dir}...", flush=True)
+        bot_logger.info(f"正在启动浏览器，数据目录: {user_data_dir}")
         self.context = await self.playwright.chromium.launch_persistent_context(
             user_data_dir,
             headless=self.headless,
             channel="chrome",
             args=["--disable-blink-features=AutomationControlled"]
         )
-        print("[MANAGER] Browser context launched.", flush=True)
+        bot_logger.info("浏览器上下文已就绪。")
 
         self.context.on("page", self.on_page_created)
 
         lobby_page = self.context.pages[0] if self.context.pages else await self.context.new_page()
-        self.lobby_manager = LobbyManager(lobby_page)
+        self.lobby_manager = LobbyManager(lobby_page, preferred_stakes=self.preferred_stakes)
 
         if lobby_page.url == "about:blank":
-            print("[MANAGER] 导航到 Replay Poker 大厅...", flush=True)
+            bot_logger.info("正在导航至 Replay Poker 大厅...")
             await lobby_page.goto("https://www.casino.org/replaypoker/lobby/rings", wait_until="domcontentloaded", timeout=60000)
 
-        print(f"BrowserManager initialized. Max tables: {self.max_tables}", flush=True)
+        bot_logger.info(f"浏览器管理器初始化完成。最大桌数: {self.max_tables}")
 
     @staticmethod
     def _extract_table_id(url: str) -> str | None:
@@ -111,29 +113,21 @@ class BrowserManager:
 
     async def _get_available_table(self) -> str | None:
         """
-        获取可用的桌子 URL（排除已访问过的）。
-        
-        Returns:
-            桌子 URL 或 None
+        获取可用的桌子 URL（从候选列表中排除最近访问过的）。
         """
-        max_attempts = 5
-        for attempt in range(max_attempts):
-            table_url = await self.lobby_manager.get_best_table_url()
-            if not table_url:
-                return None
-                
+        all_urls = await self.lobby_manager.get_all_available_tables()
+        if not all_urls:
+            return None
+            
+        for table_url in all_urls:
             table_id = self._extract_table_id(table_url)
-            if not table_id:
-                return table_url  # 无法提取 ID，直接返回
-                
-            # 检查是否已访问过
-            if table_id not in self._visited_tables:
+            # 如果桌子没访问过，或者是无法提取 ID 的特殊 URL，直接返回
+            if not table_id or table_id not in self._visited_tables:
                 return table_url
             else:
-                print(f"[MANAGER] Table {table_id} already visited, trying another...", flush=True)
-                await asyncio.sleep(1)
+                bot_logger.info(f"桌子 {table_id} 属于最近访问过的记录，尝试下一个候选...")
                 
-        print(f"[MANAGER] All available tables have been visited ({len(self._visited_tables)} tables)", flush=True)
+        bot_logger.warning(f"当前大厅可见的所有桌子 ({len(all_urls)} 张) 都在最近的 5 次访问记录中。")
         return None
 
     async def on_page_created(self, page):
@@ -152,7 +146,7 @@ class BrowserManager:
             return
         if table_id in self.table_managers:
             return
-        print(f"[MANAGER] New table tab detected (id={table_id}): {url}", flush=True)
+        bot_logger.info(f"检测到新牌桌标签页 (ID={table_id}): {url}")
         strategy_type = self.get_strategy_type()
         manager = TableManager(page, strategy_type=strategy_type)
 
@@ -190,14 +184,13 @@ class BrowserManager:
         table_url = manager.page.url
         table_id = BrowserManager._extract_table_id(table_url) or "unknown"
         
-        print(
-            f"[MANAGER] 🏁 Table Closed Statistics:\n"
-            f"   - Table ID: {table_id}\n"
-            f"   - Hands: {manager.hands_played}, Cycles: {manager.dealer_cycle_count}\n"
-            f"   - Start Stack: {start_chips}, Added Buy-in: {added_buyin}, Final Chips: {current_chips}\n"
-            f"   - This Table Profit: {profit:+d}\n"
-            f"   - Total Accumulated Profit: {self._accumulated_stats['total_profit']:+d}",
-            flush=True
+        bot_logger.info(
+            f"🏁 牌桌统计汇总:\n"
+            f"   - 桌子 ID: {table_id}\n"
+            f"   - 手数: {manager.hands_played}, 轮次: {manager.dealer_cycle_count}\n"
+            f"   - 初始筹码: {start_chips}, 追加买入: {added_buyin}, 最终筹码: {current_chips}\n"
+            f"   - 本桌盈利: {profit:+d}\n"
+            f"   - 累计总盈利: {self._accumulated_stats['total_profit']:+d}"
         )
 
     async def run_tick(self) -> bool:
@@ -214,7 +207,7 @@ class BrowserManager:
         }
         for tid, m in closed_tables.items():
             self._accumulate_table_stats(m)
-            print(f"[MANAGER] Table {tid} closed. Stats accumulated.", flush=True)
+            bot_logger.info(f"牌桌 {tid} 已关闭，统计数据已归档。")
         
         # 移除已关闭的桌子
         self.table_managers = {
@@ -238,14 +231,16 @@ class BrowserManager:
                 if table_url:
                     table_id = self._extract_table_id(table_url)
                     if table_id and table_id not in self.table_managers:
-                        print(f"[MANAGER] Capacity for more tables. Attempting to join: {table_url}", flush=True)
-                        # 记录为已访问
-                        self._visited_tables.add(table_id)
+                        bot_logger.info(f"当前有空位，尝试加入牌桌: {table_url}")
+                        # 记录为已访问 (FIFO 队列，维持 5 条记录)
+                        self._visited_tables.append(table_id)
+                        if len(self._visited_tables) > 5:
+                            self._visited_tables.pop(0)
                         await self.lobby_manager.open_table(table_url)
                 else:
                     # 没有可用桌子
                     if len(self.table_managers) == 0:
-                        print("[MANAGER] No available tables and no active tables. Task should end.", flush=True)
+                        bot_logger.info("当前无可用桌子且无活跃牌桌，任务结束。")
                         return False
 
         await asyncio.sleep(5)
@@ -263,7 +258,7 @@ class BrowserManager:
             try:
                 await m.execute_turn()
             except Exception as e:
-                print(f"[MANAGER] Error in table tick: {e}", flush=True)
+                bot_logger.error(f"牌桌执行出错: {e}")
 
         return True
 
