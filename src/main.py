@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Poker Platform - CLI and Auto modes.
+德州扑克 AI - 统一入口
+
+流程：选平台 → 配置 → 运行 → 报告
 """
 import asyncio
 import argparse
@@ -13,914 +15,86 @@ _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from src.platforms.browser.adapters import ReplayPokerAdapter, TableInfo, TableFilter
-from src.platforms.browser.browser_platform import (
-    BrowserPlatform,
-    BrowserPlatformConfig,
-    TableSelectionStrategy
-)
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.prompt import Prompt, IntPrompt
+from rich.text import Text
+
 from src.utils.logger import bot_logger
 
+console = Console()
 
-class BrowserTestCLI:
-    """Interactive test CLI for BrowserPlatform."""
-    
-    def __init__(
-        self,
-        config: Optional[BrowserPlatformConfig] = None,
-        headless: bool = False
-    ):
-        self.config = config or BrowserPlatformConfig.from_file()
-        self.config.headless = headless
-        
-        self.platform = BrowserPlatform(config=self.config)
-        self.platform.auto_mode = False
-        
-        self.running = False
-        
-        # 截图配置 - 放在 data 目录下
-        self.screenshot_dir = "./data/snapshots"
-        self.auto_screenshot_enabled = False
-        self.auto_screenshot_on_actions = True
-        self.auto_screenshot_on_state_change = False
-        self.screenshot_counter = 0
-        
-        # 主动提示配置
-        self.last_prompt_actions = None  # 上次提示的动作集合
-        self.monitor_task = None         # 状态监控任务
-        
-        # 创建截图目录
-        import os
-        os.makedirs(self.screenshot_dir, exist_ok=True)
-    
-    async def start(self):
-        """Start the platform and CLI."""
-        await self.platform.initialize()
-        self.running = True
-        
-        print("\n" + "=" * 60)
-        print("  Browser Poker Platform Test CLI")
-        print("=" * 60)
-        print(f"  Website: {self.platform.adapter.get_name()}")
-        print(f"  Config: preferred_stakes={self.config.preferred_stakes}")
-        print(f"          strategy={self.config.table_selection_strategy.value}")
-        print("=" * 60 + "\n")
-        
-        self.print_help()
-        
-        # 启动状态监控任务
-        self.monitor_task = asyncio.create_task(self.monitor_game_state())
-    
-    async def stop(self):
-        """Stop the platform."""
-        if self.monitor_task:
-            self.monitor_task.cancel()
-            try:
-                await self.monitor_task
-            except asyncio.CancelledError:
-                pass
-        
-        await self.platform.stop()
-        self.running = False
-    
-    async def monitor_game_state(self):
-        """Monitor game state and prompt user when it's their turn to act."""
-        # 使用一个标志来避免输出和输入竞争
-        last_prompted_actions = None
-        debug_counter = 0
-        
-        while self.running:
-            try:
-                await asyncio.sleep(0.5)  # 提高检查频率
-                
-                # 调试：偶尔输出监控在运行的信息（每10秒）
-                debug_counter += 1
-                if debug_counter % 20 == 0:
-                    # 只在有桌子打开时才显示调试信息
-                    if self.platform.table_pages:
-                        pass  # 可以取消注释下面的行来调试
-                        # print("\r[Monitor running]   ", end="", flush=True)
-                
-                # 如果 last_prompt_actions 是 empty frozenset，说明 join 正在进行中
-                if self.last_prompt_actions == frozenset():
-                    continue
-                
-                if not self.platform.table_pages:
-                    continue
-                
-                # 获取可用动作
-                actions = await self.platform.get_available_actions()
-                available_actions = actions.get('available', [])
-                
-                # 只有当有可用动作，并且与上次提示不同时才显示
-                if available_actions and len(available_actions) > 0:
-                    # 将动作转为 frozenset 以便比较
-                    current_actions = frozenset(available_actions)
-                    if current_actions != last_prompted_actions:
-                        last_prompted_actions = current_actions
-                        self.last_prompt_actions = current_actions
-                        print("\n" + "=" * 60)
-                        print("  ⚡ Your turn to act!")
-                        print("=" * 60)
-                        await self.cmd_available_actions()
-                        print("test-cli> ", end="", flush=True)
-                
-                # 如果没有可用动作，清空上次提示，等下次有动作时再提示
-                elif not available_actions and last_prompted_actions is not None:
-                    last_prompted_actions = None
-                    self.last_prompt_actions = None
-                    
-            except Exception as e:
-                # 忽略监控错误，避免影响主流程
-                pass
-    
-    def print_help(self):
-        """Print help message."""
-        print("\n" + "-" * 60)
-        print("  Available Commands:")
-        print("-" * 60)
-        
-        print("\n  [Login & Lobby]")
-        print("    login              - Ensure logged in (supports manual login)")
-        print("    lobby              - Navigate to lobby")
-        print("    tables [filter]    - List available tables (filter: stakes)")
-        print("    best               - Show best available table")
-        print("    open [idx|url]     - Open a table by index, URL, or best")
-        print("    join [min|max|amt] - Quick join: find best table and sit down")
-        print("    clearhistory       - Clear visited table history")
-        
-        print("\n  [Table Management]")
-        print("    sit                - Try to sit down at current table")
-        print("    buyin <amount>     - Set buy-in amount and confirm")
-        print("    buyin default      - Use default buy-in amount")
-        print("    buyin cancel       - Cancel buy-in popup")
-        print("    leave              - Leave current table")
-        
-        print("\n  [Game State]")
-        print("    state              - Show current game state")
-        print("    actions            - Show available actions")
-        
-        print("\n  [Game Actions]")
-        print("    fold               - Fold")
-        print("    check              - Check")
-        print("    call               - Call")
-        print("    raise <amount>     - Raise to amount")
-        print("    bet <amount>       - Bet amount")
-        print("    allin              - Go all-in")
-        
-        print("\n  [Configuration]")
-        print("    config             - Show current configuration")
-        print("    stakes <level>     - Set preferred stakes (e.g. 1/2, 5/10)")
-        print("    strategy <type>    - Set table selection strategy")
-        print("                         (fifo|most|least|random)")
-        
-        print("\n  [Screenshots]")
-        print("    screenshot [name]  - Take manual screenshot")
-        print("    snap               - Quick snapshot (timestamped)")
-        print("    autosnap on/off    - Toggle auto-screenshot mode")
-        print("    snaps              - List recent screenshots")
-        print("    snapdir            - Show screenshots directory")
-        
-        print("\n  [Utility]")
-        print("    url                - Show current URL(s)")
-        print("    help, ?            - Show this help")
-        print("    quit, q, exit      - Exit the program")
-        print("-" * 60 + "\n")
-    
-    async def run(self):
-        """Run the interactive CLI loop."""
-        await self.start()
-        
-        # Python 3.8 兼容：使用 run_in_executor 替代 to_thread
-        import functools
-        
-        try:
-            while self.running:
-                try:
-                    # 使用 run_in_executor 来避免 input() 阻塞事件循环
-                    loop = asyncio.get_event_loop()
-                    cmd_line = await loop.run_in_executor(
-                        None, functools.partial(input, "test-cli> ")
-                    )
-                    cmd_line = cmd_line.strip()
-                    
-                    if not cmd_line:
-                        continue
-                    
-                    parts = cmd_line.split()
-                    cmd = parts[0].lower()
-                    
-                    # 退出
-                    if cmd in ("quit", "q", "exit"):
-                        break
-                    
-                    # 帮助
-                    elif cmd in ("help", "?"):
-                        self.print_help()
-                    
-                    # 登录
-                    elif cmd == "login":
-                        await self.cmd_login()
-                    
-                    # 大厅
-                    elif cmd == "lobby":
-                        await self.platform.navigate_to_lobby()
-                        print("Navigated to lobby.")
-                    
-                    # 列出桌子
-                    elif cmd == "tables":
-                        filter_stakes = parts[1] if len(parts) > 1 else None
-                        await self.cmd_tables(filter_stakes)
-                    
-                    # 最佳桌子
-                    elif cmd == "best":
-                        await self.cmd_best_table()
-                    
-                    # 打开桌子
-                    elif cmd == "open":
-                        target = parts[1] if len(parts) > 1 else None
-                        await self.cmd_open_table(target)
-                    
-                    # 一键加入（找最佳桌子并坐下）
-                    elif cmd == "join":
-                        buyin_type = parts[1] if len(parts) > 1 else "min"
-                        await self.cmd_join(buyin_type)
-                    
-                    # 清除历史
-                    elif cmd == "clearhistory":
-                        self.platform.adapter.clear_visited_history()
-                        print("Visited history cleared.")
-                    
-                    # 入座
-                    elif cmd == "sit":
-                        if len(parts) > 1 and parts[1] == "in":
-                            success = await self.platform.sit_in()
-                            print("Sit in:" + (" ✓ Success" if success else " ✗ Failed"))
-                        else:
-                            success = await self.platform.try_sit_down()
-                            print("Sit down:" + (" ✓ Success" if success else " ✗ Failed"))
-                            print("  Tip: Use 'buyin <amount>' to confirm buy-in if popup appears")
-                    
-                    # buyin 命令
-                    elif cmd == "buyin":
-                        if len(parts) >= 2:
-                            amount = parts[1]
-                            if amount.lower() == "default":
-                                await self.cmd_buyin_default()
-                            elif amount.lower() == "min":
-                                await self.cmd_buyin_min()
-                            elif amount.lower() == "max":
-                                await self.cmd_buyin_max()
-                            elif amount.lower() == "cancel":
-                                await self.cmd_buyin_cancel()
-                            elif amount.isdigit():
-                                await self.cmd_buyin_amount(int(amount))
-                            else:
-                                print(f"Unknown buyin command: {amount}")
-                        else:
-                            print("Usage: buyin <amount>|default|min|max|cancel")
-                    
-                    # 离开
-                    elif cmd == "leave":
-                        await self.platform.leave_table()
-                        print("Left table.")
-                    
-                    # 状态
-                    elif cmd == "state" or cmd == "status":
-                        await self.cmd_game_state()
-                    
-                    # 可用操作
-                    elif cmd == "actions":
-                        await self.cmd_available_actions()
-                    
-                    # 操作
-                    elif cmd in ("fold", "check", "call", "allin"):
-                        await self.cmd_execute_action(cmd)
-                    
-                    elif cmd in ("raise", "bet"):
-                        if len(parts) > 1:
-                            amount_or_preset = parts[1]
-                            if amount_or_preset.lower() in ("min", "half", "pot", "max"):
-                                await self.cmd_execute_action(cmd, None, amount_or_preset.lower())
-                            elif amount_or_preset.isdigit():
-                                await self.cmd_execute_action(cmd, int(amount_or_preset))
-                            else:
-                                print(f"Unknown preset or amount: {amount_or_preset}")
-                        else:
-                            print(f"Usage: {cmd} <amount>|min|half|pot|max")
-                    
-                    # 配置
-                    elif cmd == "config":
-                        self.cmd_show_config()
-                    
-                    elif cmd == "stakes" and len(parts) > 1:
-                        self.config.preferred_stakes = parts[1]
-                        print(f"Preferred stakes set to: {parts[1]}")
-                    
-                    elif cmd == "strategy" and len(parts) > 1:
-                        await self.cmd_set_strategy(parts[1])
-                    
-                    # 快照功能
-                    elif cmd == "screenshot":
-                        await self.cmd_screenshot(parts[1] if len(parts) > 1 else None)
-                    elif cmd == "snap":
-                        await self.cmd_quick_snapshot()
-                    elif cmd == "autosnap":
-                        if len(parts) > 1:
-                            self.auto_screenshot_enabled = (parts[1].lower() == "on")
-                            print(f"Auto-snapshot {'enabled' if self.auto_screenshot_enabled else 'disabled'}")
-                        else:
-                            print(f"Auto-snapshot is currently {'enabled' if self.auto_screenshot_enabled else 'disabled'}")
-                    elif cmd == "snaps":
-                        self.cmd_list_snapshots()
-                    elif cmd == "snapdir":
-                        print(f"Screenshots directory: {self.screenshot_dir}")
-                    
-                    # 工具
-                    elif cmd == "url":
-                        await self.cmd_show_urls()
-                    
-                    # 未知命令
-                    else:
-                        print(f"Unknown command: {cmd}. Type 'help' for commands.")
-                
-                except KeyboardInterrupt:
-                    break
-                except Exception as e:
-                    import traceback
-                    print(f"\nError: {e}")
-                    traceback.print_exc()
-                    print()
-        
-        finally:
-            await self.stop()
-            print("\nGoodbye!")
-    
-    # === 命令实现 ===
-    
-    async def cmd_login(self):
-        """Login command."""
-        print("\n" + "-" * 60)
-        print("  Manual Login Required")
-        print("-" * 60)
-        print("  Please log in to the poker website in the browser.")
-        print("  This program will wait until login is detected.\n")
-        print("  Press Ctrl+C to cancel.\n")
-        
-        logged_in = await self.platform.ensure_logged_in()
-        
-        if logged_in:
-            print("✓ Logged in successfully!")
-        else:
-            print("✗ Login failed or timeout.")
-        print()
-    
-    async def cmd_tables(self, filter_stakes: Optional[str] = None):
-        """List tables command."""
-        filter_obj = TableFilter(
-            stakes=filter_stakes or self.config.preferred_stakes,
-            min_players=self.config.min_players,
-            max_players=self.config.max_players
+AVAILABLE_STRATEGIES = ["gto", "range", "exploitative", "checkorfold", "aggressive", "neural", "icm"]
+
+
+def select_platform() -> str:
+    """交互式选择平台"""
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_row("1.", "Arena  (本地模拟对抗)")
+    table.add_row("2.", "Browser (浏览器在线对战)")
+    table.add_row("3.", "MTT    (多桌锦标赛)")
+    table.add_row("4.", "SNG    (Sit & Go 单桌赛)")
+
+    console.print(Panel(table, title="选择平台", border_style="cyan"))
+    choice = Prompt.ask("请选择", choices=["1", "2", "3", "4"], default="1")
+    if choice == "1":
+        return "arena"
+    elif choice == "3":
+        return "mtt"
+    elif choice == "4":
+        return "sng"
+    return "browser"
+
+
+def configure_arena():
+    """交互式配置竞技场"""
+    from src.platforms.arena.platform import ArenaConfig, ArenaPlayerConfig
+
+    console.print()
+    num_players = IntPrompt.ask("玩家数量", default=3, choices=[str(i) for i in range(2, 7)])
+
+    players: list[ArenaPlayerConfig] = []
+    for i in range(num_players):
+        console.print(f"\n[bold]Player {i + 1}:[/bold]")
+        name = Prompt.ask("  名称", default=f"Player{i + 1}")
+        strategy = Prompt.ask(
+            f"  策略 ({'/'.join(AVAILABLE_STRATEGIES)})",
+            choices=AVAILABLE_STRATEGIES,
+            default=AVAILABLE_STRATEGIES[i % len(AVAILABLE_STRATEGIES)]
         )
-        
-        tables = await self.platform.adapter.get_available_tables(
-            self.platform.lobby_page,
-            filter_obj
-        )
-        
-        print(f"\n--- Available Tables ({len(tables)}) ---")
-        if not tables:
-            print("  No tables found.")
-        else:
-            for i, table in enumerate(tables[:20]):
-                visited = " [VISITED]" if (
-                    table.table_id and 
-                    self.platform.adapter.is_table_visited(table.table_id)
-                ) else ""
-                print(f"  {i+1:2d}. {table.stakes or '?'} "
-                      f"({table.players}/{table.max_players})"
-                      f"{visited}")
-                print(f"       {table.url}")
-        
-        print()
-    
-    async def cmd_best_table(self):
-        """Show best available table."""
-        best = await self.platform.select_best_table()
-        if not best:
-            print("\nNo available tables.\n")
-            return
-        
-        visited = " (VISITED)" if (
-            best.table_id and 
-            self.platform.adapter.is_table_visited(best.table_id)
-        ) else ""
-        
-        print(f"\n--- Best Available Table (Strategy: {self.config.table_selection_strategy.value}) ---")
-        print(f"  Stakes: {best.stakes or '?'}")
-        print(f"  Players: {best.players}/{best.max_players}{visited}")
-        print(f"  URL: {best.url}")
-        print()
-    
-    async def cmd_open_table(self, target: Optional[str] = None):
-        """Open table command."""
-        if target is None or target == "best":
-            # 打开最佳桌子
-            table_id = await self.platform.open_table()
-            if table_id:
-                print(f"\nOpened table: {table_id}\n")
-            return
-        
-        # 检查是否是数字（索引）
-        if target.isdigit():
-            idx = int(target) - 1
-            tables = await self.platform.get_available_tables()
-            if 0 <= idx < len(tables):
-                await self.platform.open_table(table_info=tables[idx])
-                print(f"\nOpened table {idx+1}\n")
-            else:
-                print(f"\nInvalid index: {target}\n")
-        else:
-                # 作为 URL
-                await self.platform.open_table(table_url=target)
-                print(f"\nOpened URL: {target}\n")
-    
-    async def cmd_join(self, buyin_type: str = "min"):
-        """Quick join - find best table, open it, sit down, and buy-in."""
-        print("\n=== Quick Join ===")
-        
-        # 暂停自动提示，避免在 join 过程中误触发
-        original_last_prompt = self.last_prompt_actions
-        self.last_prompt_actions = frozenset()  # 避免触发
-        
-        try:
-            # 0. 确保在大厅页面
-            print("0. Ensuring we're in lobby...")
-            try:
-                await self.platform.navigate_to_lobby()
-                print("   ✓ In lobby")
-            except Exception as e:
-                print(f"   ✗ Failed to navigate to lobby: {e}")
-                print()
-                return
-            
-            # 1. 找最佳桌子
-            print("1. Finding best table...")
-            best = await self.platform.select_best_table()
-            if not best:
-                print("   ✗ No available tables")
-                print()
-                return
-            
-            print(f"   ✓ Found: {best.stakes} ({best.players}/{best.max_players})")
-            
-            # 2. 打开桌子
-            print(f"2. Opening table...")
-            table_id = await self.platform.open_table(table_info=best)
-            if not table_id:
-                print("   ✗ Failed to open table")
-                print()
-                return
-            
-            print(f"   ✓ Opened table: {table_id}")
-            
-            # 等待页面加载
-            print("   Waiting for table to load...")
-            await asyncio.sleep(3)
-            
-            # 3. 入座
-            print("3. Sitting down...")
-            sit_success = await self.platform.try_sit_down()
-            if not sit_success:
-                print("   ✗ Failed to sit down")
-                print()
-                return
-            
-            print("   ✓ Sat down successfully")
-            
-            # 等待 buy-in 弹窗出现
-            print("   Waiting for buy-in popup...")
-            await asyncio.sleep(2)
-            
-            # 4. Buy-in
-            print(f"4. Buy-in ({buyin_type})...")
-            if buyin_type.lower() == "min":
-                await self.cmd_buyin_min()
-            elif buyin_type.lower() == "max":
-                await self.cmd_buyin_max()
-            elif buyin_type.lower() == "default":
-                await self.cmd_buyin_default()
-            elif buyin_type.isdigit():
-                await self.cmd_buyin_amount(int(buyin_type))
-            else:
-                print(f"   ✗ Unknown buy-in type: {buyin_type}")
-            
-            print("\n=== Join complete ===")
-        finally:
-            # 恢复自动提示
-            self.last_prompt_actions = original_last_prompt
-    
-    async def cmd_game_state(self):
-        """Show game state."""
-        state = await self.platform.get_game_state()
-        # [FIX] 使用 get_all_visible_actions 来显示所有可见的动作，不受 is_my_turn 限制
-        actions = await self.platform.get_all_visible_actions()
-        available = actions.get('available', [])
-        
-        print(f"\n--- Game State ---")
-        print(f"  Pot: {state.pot}")
-        print(f"  Community Cards: {state.community_cards}")
-        print(f"  My Seat: {state.my_seat_id}")
-        print(f"  To Call: {state.to_call}")
-        print(f"  Min Raise: {state.min_raise}")
-        print(f"  My Turn: {state.is_my_turn}")
-        if available:
-            print(f"  Available Actions: {', '.join(available)}")
-        else:
-            print(f"  Available Actions: (none)")
-        print()
-    
-    async def cmd_available_actions(self):
-        """Show available actions (bypasses turn check for debugging)."""
-        actions = await self.platform.get_all_visible_actions()
-        
-        print(f"\n=== Available Actions ===")
-        
-        # 显示可用操作
-        available = actions.get('available', [])
-        if available:
-            print(f"Actions:")
-            for action in available:
-                if action in ["fold", "check"]:
-                    print(f"  • {action}")
-                elif action == "call":
-                    print(f"  • call ({actions.get('to_call', 0)})")
-                elif action in ["raise", "bet"]:
-                    print(f"  • {action} <amount>|min|half|pot|max")
-                    print(f"    (min: {actions.get('min_raise', 0)})")
-                elif action == "allin":
-                    print(f"  • allin")
-        else:
-            print("No actions available")
-        
-        # 显示预设按钮
-        presets = actions.get('presets', {})
-        if presets:
-            preset_labels = []
-            if presets.get('min'):
-                preset_labels.append("min")
-            if presets.get('half'):
-                preset_labels.append("½ Pot")
-            if presets.get('pot'):
-                preset_labels.append("Pot")
-            if presets.get('max'):
-                preset_labels.append("Max")
-            print(f"\nPresets: {', '.join(preset_labels)}")
-        
-        # 显示 To Call
-        to_call = actions.get('to_call', 0)
-        if to_call > 0:
-            print(f"\nTo Call: {to_call}")
-        
-        print()
-    
-    async def cmd_execute_action(self, action: str, amount: Optional[int] = None, preset: Optional[str] = None):
-        """Execute a game action."""
-        from src.core.interfaces import GameAction, ActionType
-        
-        action_map = {
-            "fold": ActionType.FOLD,
-            "check": ActionType.CHECK,
-            "call": ActionType.CALL,
-            "raise": ActionType.RAISE,
-            "bet": ActionType.RAISE,  # 使用相同类型
-            "allin": ActionType.ALL_IN,
-        }
-        
-        action_type = action_map.get(action)
-        if not action_type:
-            print(f"Unknown action: {action}")
-            return
-        
-        game_action = GameAction(action_type=action_type)
-        if amount is not None:
-            game_action.amount = amount
-        if preset is not None:
-            game_action.bet_size_hint = preset
-        
-        success = await self.platform.execute_action(game_action)
-        
-        if amount:
-            print(f"\n{action} {amount}: " + ("✓" if success else "✗") + "\n")
-        else:
-            print(f"\n{action}: " + ("✓" if success else "✗") + "\n")
-        
-        # 自动快照（如果启用）
-        if self.auto_screenshot_enabled:
-            context = f"action_{action}{f'_{amount}' if amount else ''}"
-            await self._take_full_snapshot(context)
-    
-    def cmd_show_config(self):
-        """Show current config."""
-        print(f"\n--- Current Configuration ---")
-        print(f"  Headless: {self.config.headless}")
-        print(f"  Preferred Stakes: {self.config.preferred_stakes}")
-        print(f"  Table Strategy: {self.config.table_selection_strategy.value}")
-        print(f"  Max Tables: {self.config.max_tables}")
-        print(f"  Strategy Type: {self.config.strategy_type}")
-        print(f"  User Data Dir: {self.config.user_data_dir}")
-        print()
-    
-    async def cmd_set_strategy(self, strategy_str: str):
-        """Set table selection strategy."""
-        strategy_map = {
-            "fifo": TableSelectionStrategy.FIFO,
-            "most": TableSelectionStrategy.MOST_PLAYERS,
-            "least": TableSelectionStrategy.LEAST_PLAYERS,
-            "random": TableSelectionStrategy.RANDOM,
-        }
-        
-        strategy = strategy_map.get(strategy_str.lower())
-        if not strategy:
-            print(f"Unknown strategy: {strategy_str}")
-            print(f"Valid options: {', '.join(strategy_map.keys())}")
-            return
-        
-        self.config.table_selection_strategy = strategy
-        print(f"Table selection strategy set to: {strategy.value}")
-    
-    async def cmd_show_urls(self):
-        """Show current URLs."""
-        print(f"\n--- Current URLs ---")
-        print(f"  Lobby: {self.platform.lobby_page.url}")
-        for table_id, page in self.platform.table_pages.items():
-            print(f"  Table {table_id}: {page.url}")
-        print()
-    
-    async def cmd_screenshot(self, name: Optional[str] = None):
-        """Take a screenshot (image only)."""
-        import time
-        
-        if name is None:
-            name = f"screenshot_{int(time.time())}.png"
-        
-        # 保存大厅页面截图
-        lobby_path = f"{self.screenshot_dir}/lobby_{name}"
-        await self.platform.lobby_page.screenshot(path=lobby_path)
-        print(f"Saved lobby screenshot: {lobby_path}")
-        
-        # 保存牌桌页面截图
-        for i, (table_id, page) in enumerate(self.platform.table_pages.items()):
-            table_path = f"{self.screenshot_dir}/table_{table_id}_{name}"
-            await page.screenshot(path=table_path)
-            print(f"Saved table screenshot: {table_path}")
-    
-    async def cmd_quick_snapshot(self):
-        """Quick snapshot - captures images and page data for debugging."""
-        await self._take_full_snapshot()
-    
-    async def _take_full_snapshot(self, context: str = ""):
-        """Take a full snapshot including images, HTML, and game state."""
-        import time
-        import os
-        import json
-        
-        timestamp = int(time.time())
-        self.screenshot_counter += 1
-        
-        # 创建快照目录
-        snap_dir = f"{self.screenshot_dir}/snap_{timestamp}"
-        os.makedirs(snap_dir, exist_ok=True)
-        
-        # 基本信息
-        info = {
-            "timestamp": timestamp,
-            "counter": self.screenshot_counter,
-            "context": context,
-            "urls": {
-                "lobby": self.platform.lobby_page.url
-            },
-            "tables": [],
-            "game_state": None,
-            "available_actions": None
-        }
-        
-        # 保存大厅页面
-        await self.platform.lobby_page.screenshot(path=f"{snap_dir}/lobby.png")
-        html = await self.platform.lobby_page.content()
-        with open(f"{snap_dir}/lobby.html", "w", encoding="utf-8") as f:
-            f.write(html)
-        info["urls"]["lobby"] = self.platform.lobby_page.url
-        
-        # 保存牌桌页面
-        for table_id, page in self.platform.table_pages.items():
-            table_info = {
-                "table_id": table_id,
-                "url": page.url
-            }
-            
-            await page.screenshot(path=f"{snap_dir}/table_{table_id}.png")
-            html = await page.content()
-            with open(f"{snap_dir}/table_{table_id}.html", "w", encoding="utf-8") as f:
-                f.write(html)
-            
-            info["tables"].append(table_info)
-        
-        # 获取游戏状态
-        try:
-            state = await self.platform.get_game_state()
-            info["game_state"] = {
-                "pot": state.pot,
-                "community_cards": state.community_cards,
-                "my_seat_id": state.my_seat_id,
-                "to_call": state.to_call,
-                "min_raise": state.min_raise
-            }
-        except Exception as e:
-            info["game_state_error"] = str(e)
-        
-        # 获取可用操作
-        try:
-            actions = await self.platform.get_available_actions()
-            info["available_actions"] = actions
-        except Exception as e:
-            info["actions_error"] = str(e)
-        
-        # 保存信息文件
-        with open(f"{snap_dir}/info.json", "w", encoding="utf-8") as f:
-            json.dump(info, f, indent=2, ensure_ascii=False)
-        
-        print(f"\n✅ Snapshot saved to: {snap_dir}")
-        print(f"   - {len(info['tables']) + 1} screenshots")
-        print(f"   - {len(info['tables']) + 1} HTML files")
-        print(f"   - Game state captured")
-        print()
-    
-    def cmd_list_snapshots(self):
-        """List recent snapshots."""
-        import os
-        
-        snap_dirs = []
-        for entry in os.listdir(self.screenshot_dir):
-            path = os.path.join(self.screenshot_dir, entry)
-            if os.path.isdir(path) and entry.startswith("snap_"):
-                snap_dirs.append(path)
-        
-        snap_dirs.sort(reverse=True)
-        
-        print(f"\n--- Recent Snapshots ({len(snap_dirs)}) ---")
-        if not snap_dirs:
-            print("  No snapshots found.")
-        else:
-            for i, snap_path in enumerate(snap_dirs[:10]):
-                basename = os.path.basename(snap_path)
-                timestamp = basename.replace("snap_", "")
-                try:
-                    import time
-                    dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(timestamp)))
-                except:
-                    dt = "Unknown"
-                
-                # 统计文件数
-                files = os.listdir(snap_path)
-                images = [f for f in files if f.endswith(".png")]
-                htmls = [f for f in files if f.endswith(".html")]
-                
-                print(f"  {i+1}. {basename}")
-                print(f"     Time: {dt}")
-                print(f"     Files: {len(files)} ({len(images)} images, {len(htmls)} HTML)")
-        print()
-    
-    async def maybe_auto_snapshot(self, context: str = ""):
-        """Take automatic snapshot if enabled."""
-        if self.auto_screenshot_enabled:
-            await self._take_full_snapshot(context)
-    
-    async def cmd_buyin_amount(self, amount: int):
-        """Set buy-in amount and confirm with OK."""
-        page = self.platform._get_table_page()
-        if not page:
-            print("No active table page found!")
-            return
-        
-        try:
-            success = await self.platform.adapter.set_buyin_amount(page, amount)
-            if success:
-                # 点击 OK 确认
-                confirm_success = await self.platform.adapter.confirm_buyin(page)
-                if confirm_success:
-                    print(f"✓ Buy-in {amount} confirmed!")
-                else:
-                    print("✗ Failed to click OK")
-            else:
-                print("✗ Failed to set buy-in amount")
-        except Exception as e:
-            print(f"Error during buy-in: {e}")
-    
-    async def cmd_buyin_default(self):
-        """Directly click OK with current default amount."""
-        page = self.platform._get_table_page()
-        if not page:
-            print("No active table page found!")
-            return
-        
-        try:
-            # 直接点击 OK，不改变金额
-            success = await self.platform.adapter.confirm_buyin(page)
-            if success:
-                print("✓ Buy-in confirmed with default amount!")
-            else:
-                print("✗ Failed to click OK")
-        except Exception as e:
-            print(f"Error during buy-in: {e}")
-    
-    async def cmd_buyin_min(self):
-        """Click Min button then OK."""
-        page = self.platform._get_table_page()
-        if not page:
-            print("No active table page found!")
-            return
-        
-        try:
-            # 点击 Min 按钮
-            success = await self.platform.adapter.select_min_buyin(page)
-            if success:
-                # 点击 OK 确认
-                confirm_success = await self.platform.adapter.confirm_buyin(page)
-                if confirm_success:
-                    print("✓ Buy-in Min confirmed!")
-                else:
-                    print("✓ Selected Min, but failed to click OK")
-            else:
-                print("✗ Failed to select Min")
-        except Exception as e:
-            print(f"Error during buy-in: {e}")
-    
-    async def cmd_buyin_max(self):
-        """Click Max button then OK."""
-        page = self.platform._get_table_page()
-        if not page:
-            print("No active table page found!")
-            return
-        
-        try:
-            # 点击 Max 按钮
-            success = await self.platform.adapter.select_max_buyin(page)
-            if success:
-                # 点击 OK 确认
-                confirm_success = await self.platform.adapter.confirm_buyin(page)
-                if confirm_success:
-                    print("✓ Buy-in Max confirmed!")
-                else:
-                    print("✓ Selected Max, but failed to click OK")
-            else:
-                print("✗ Failed to select Max")
-        except Exception as e:
-            print(f"Error during buy-in: {e}")
-    
-    async def cmd_buyin_cancel(self):
-        """Cancel buy-in popup."""
-        page = self.platform._get_table_page()
-        if not page:
-            print("No active table page found!")
-            return
-        
-        try:
-            success = await self.platform.adapter.cancel_buyin(page)
-            if success:
-                print("✓ Buy-in popup cancelled")
-            else:
-                print("✗ Failed to cancel buy-in")
-        except Exception as e:
-            print(f"Error cancelling buy-in: {e}")
+        initial_stack = IntPrompt.ask("  初始筹码", default=1000)
+        players.append(ArenaPlayerConfig(name=name, strategy=strategy, initial_stack=initial_stack))
+
+    console.print()
+    termination = Prompt.ask("终止条件 (rounds/last_standing/time)", choices=["rounds", "last_standing", "time"], default="rounds")
+
+    max_rounds = 100
+    max_duration_min = None
+    if termination == "rounds":
+        max_rounds = IntPrompt.ask("最大轮数", default=100)
+    elif termination == "last_standing":
+        max_rounds = IntPrompt.ask("最大轮数上限", default=500)
+    elif termination == "time":
+        max_duration_min = IntPrompt.ask("最大持续时间(分钟)", default=10)
+
+    small_blind = IntPrompt.ask("小盲", default=1)
+    big_blind = IntPrompt.ask("大盲", default=2)
+
+    return ArenaConfig(
+        players=players,
+        small_blind=small_blind,
+        big_blind=big_blind,
+        termination=termination,
+        max_rounds=max_rounds,
+        max_duration_min=max_duration_min,
+    )
 
 
-async def main():
-    parser = argparse.ArgumentParser(description="Poker Platform")
-    parser.add_argument(
-        "mode",
-        choices=["cli", "auto"],
-        default="cli",
-        help="Run mode: cli (human) or auto (bot)"
-    )
-    parser.add_argument(
-        "--headless",
-        action="store_true",
-        help="Run browser in headless mode"
-    )
-    parser.add_argument(
-        "--stakes",
-        help="Preferred stakes (e.g. 1/2, 5/10)"
-    )
-    parser.add_argument(
-        "--strategy",
-        choices=["fifo", "most", "least", "random"],
-        help="Table selection strategy"
-    )
-    
-    args = parser.parse_args()
-    
-    # 加载配置
+def configure_browser(args) -> dict:
+    """配置浏览器平台"""
+    from src.platforms.browser.browser_platform import BrowserPlatformConfig, TableSelectionStrategy
+
     config = BrowserPlatformConfig.from_file()
     if args.stakes:
         config.preferred_stakes = args.stakes
@@ -932,53 +106,286 @@ async def main():
             "random": TableSelectionStrategy.RANDOM,
         }
         config.table_selection_strategy = strategy_map[args.strategy]
-    
-    if args.mode == "cli":
-        # 人工模式
+    config.headless = args.headless
+
+    return {"config": config, "mode": args.mode}
+
+
+def print_report(report):
+    """用 rich 输出比赛报告"""
+    table = Table(title="比赛报告", show_lines=True)
+    table.add_column("玩家", style="bold")
+    table.add_column("策略")
+    table.add_column("最终筹码", justify="right")
+    table.add_column("盈亏", justify="right")
+    table.add_column("VPIP%", justify="right")
+    table.add_column("PFR%", justify="right")
+    table.add_column("胜手数", justify="right")
+
+    for ps in report.player_stats:
+        profit_style = "green" if ps.profit > 0 else ("red" if ps.profit < 0 else "white")
+        table.add_row(
+            ps.name,
+            ps.strategy,
+            str(ps.final_stack),
+            f"[{profit_style}]{ps.profit:+d}[/{profit_style}]",
+            f"{ps.vpip:.1f}",
+            f"{ps.pfr:.1f}",
+            str(ps.hands_won),
+        )
+
+    console.print()
+    console.print(Panel(
+        f"总手数: {report.num_hands}  |  持续时间: {report.duration_sec:.1f}s",
+        border_style="cyan"
+    ))
+    console.print(table)
+
+
+async def run_arena(config):
+    """运行竞技场模式"""
+    from src.platforms.arena.platform import ArenaPlatform
+
+    platform = ArenaPlatform(config)
+    await platform.initialize()
+    console.print("\n[bold green]开始比赛...[/bold green]\n")
+    report = await platform.run()
+    print_report(report)
+    await platform.shutdown()
+
+
+def configure_mtt():
+    """交互式配置 MTT 锦标赛"""
+    from src.platforms.arena.mtt import MTTConfig, PrizePayout
+
+    console.print()
+    entries = IntPrompt.ask("参赛人数", default=18)
+    blind_type = Prompt.ask("盲注结构 (standard/turbo/deepstack)",
+                            choices=["standard", "turbo", "deepstack"], default="standard")
+    starting_stack = IntPrompt.ask("起始筹码", default=1000)
+    entry_fee = IntPrompt.ask("买入费", default=100)
+
+    return MTTConfig(
+        entries=entries,
+        entry_fee=entry_fee,
+        starting_stack=starting_stack,
+        blind_schedule=blind_type,
+    )
+
+
+def run_mtt(args=None):
+    """运行 MTT 锦标赛"""
+    from src.platforms.arena.mtt import MTTConfig, MTTPlayerConfig, PrizePayout, MTTManager
+
+    if args and args.mtt_entries:
+        entries = args.mtt_entries
+        blind_type = args.mtt_blinds
+        starting_stack = args.mtt_stack
+        entry_fee = args.mtt_fee
+
+        # 解析自定义奖金分配
+        prize_payout = None
+        if args.mtt_prize:
+            pcts = [float(x) for x in args.mtt_prize.split(",")]
+            prize_payout = PrizePayout({i + 1: pct / 100 for i, pct in enumerate(pcts)})
+
+        config = MTTConfig(
+            entries=entries,
+            entry_fee=entry_fee,
+            starting_stack=starting_stack,
+            blind_schedule=blind_type,
+            prize_structure=prize_payout,
+        )
+    else:
+        config = configure_mtt()
+
+    # 注册参赛者
+    manager = MTTManager(config)
+    strategies = ["gto", "range", "exploitative", "checkorfold", "aggressive"]
+    player_configs = []
+    for i in range(config.entries):
+        player_configs.append(MTTPlayerConfig(
+            name=f"Player{i + 1}",
+            strategy="mixed",
+            starting_stack=config.starting_stack,
+        ))
+
+    manager.register_players(player_configs)
+    manager.initial_seating()
+
+    console.print("\n[bold green]MTT 锦标赛开始...[/bold green]\n")
+    report = manager.run()
+    print_mtt_report(report)
+    return report
+
+
+def print_mtt_report(report):
+    """用 rich 输出 MTT 锦标赛报告"""
+    from src.platforms.arena.mtt import MTTReport
+
+    table = Table(title="MTT 锦标赛报告", show_lines=True)
+    table.add_column("名次", justify="right", style="bold")
+    table.add_column("玩家", style="bold")
+    table.add_column("策略")
+    table.add_column("奖金", justify="right")
+    table.add_column("淘汰手", justify="right")
+
+    for ps in report.player_stats:
+        prize_style = "green" if ps.prize_won > 0 else "white"
+        busted_str = f"#{ps.busted_hand}" if ps.busted_hand > 0 else "冠军!"
+        table.add_row(
+            str(ps.finish_pos),
+            ps.name,
+            ps.strategy,
+            f"[{prize_style}]{ps.prize_won}[/{prize_style}]",
+            busted_str,
+        )
+
+    console.print()
+    console.print(Panel(
+        f"参赛: {report.entries} 人  |  奖池: {report.prize_pool}  |  "
+        f"总手数: {report.total_hands}  |  耗时: {report.duration_sec:.1f}s",
+        border_style="cyan"
+    ))
+    console.print(table)
+
+
+def configure_sng():
+    """交互式配置 Sit & Go"""
+    from src.platforms.arena.sitngo import SNGConfig
+
+    console.print()
+    preset = Prompt.ask("SNG 类型 (hu/6max/9max/10max)",
+                        choices=["hu", "6max", "9max", "10max"], default="9max")
+    blind_type = Prompt.ask("盲注结构 (standard/turbo)",
+                            choices=["standard", "turbo"], default="turbo")
+    starting_stack = IntPrompt.ask("起始筹码", default=1500)
+    entry_fee = IntPrompt.ask("买入费", default=50)
+
+    return SNGConfig(
+        preset=preset,
+        entry_fee=entry_fee,
+        starting_stack=starting_stack,
+        blind_schedule=blind_type,
+    )
+
+
+def run_sng(args=None):
+    """运行 Sit & Go 单桌赛"""
+    from src.platforms.arena.sitngo import SNGConfig, SitAndGo
+    from src.platforms.arena.mtt import MTTPlayerConfig
+
+    if args and hasattr(args, 'sng_preset') and args.sng_preset:
+        config = SNGConfig(
+            preset=args.sng_preset,
+            entry_fee=args.sng_fee,
+            starting_stack=args.sng_stack,
+            blind_schedule=args.sng_blinds,
+        )
+    else:
+        config = configure_sng()
+
+    manager = SitAndGo(config)
+    strategies = ["gto", "range", "aggressive", "checkorfold", "exploitative", "icm"]
+    player_configs = []
+    for i in range(config.num_players):
+        player_configs.append(MTTPlayerConfig(
+            name=f"Player{i + 1}",
+            strategy=strategies[i % len(strategies)],
+            starting_stack=config.starting_stack,
+        ))
+
+    manager.register_players(player_configs)
+    manager.initial_seating()
+
+    console.print("\n[bold green]Sit & Go 开始...[/bold green]\n")
+    report = manager.run()
+    print_sng_report(report)
+    return report
+
+
+def print_sng_report(report):
+    """用 rich 输出 Sit & Go 报告"""
+    from src.platforms.arena.sitngo import SNG_PRESETS
+
+    preset_name = SNG_PRESETS.get(report.preset, {}).get("name", report.preset)
+    table = Table(title=f"Sit & Go ({preset_name}) 报告", show_lines=True)
+    table.add_column("名次", justify="right", style="bold")
+    table.add_column("玩家", style="bold")
+    table.add_column("策略")
+    table.add_column("奖金", justify="right")
+    table.add_column("淘汰手", justify="right")
+
+    for ps in report.player_stats:
+        prize_style = "green" if ps.prize_won > 0 else "white"
+        busted_str = f"#{ps.busted_hand}" if ps.busted_hand > 0 else "冠军!"
+        table.add_row(
+            str(ps.finish_pos),
+            ps.name,
+            ps.strategy,
+            f"[{prize_style}]{ps.prize_won}[/{prize_style}]",
+            busted_str,
+        )
+
+    console.print()
+    console.print(Panel(
+        f"参赛: {report.entries} 人  |  奖池: {report.prize_pool}  |  "
+        f"总手数: {report.total_hands}  |  耗时: {report.duration_sec:.1f}s",
+        border_style="cyan"
+    ))
+    console.print(table)
+
+
+async def run_browser(args):
+    """运行浏览器模式"""
+    from src.platforms.browser.browser_platform import BrowserPlatform, BrowserPlatformConfig
+    from src.platforms.browser.adapters import ReplayPokerAdapter, TableInfo, TableFilter
+
+    config_data = configure_browser(args)
+    config: BrowserPlatformConfig = config_data["config"]
+
+    if config_data["mode"] == "cli":
+        # CLI 交互模式
+        from src.main_browser import BrowserTestCLI
         cli = BrowserTestCLI(config=config, headless=args.headless)
         await cli.run()
-    elif args.mode == "auto":
-        # 自动模式（由 strategies 驱动）
-        print("\n=== Auto Mode ===")
-        print("Starting automated play...")
+    else:
+        # 自动模式
+        console.print("\n[bold]=== 自动模式 ===[/bold]")
         config.auto_mode = True
         platform = BrowserPlatform(config=config)
         await platform.initialize()
-        
+
         try:
-            # 确保登录
             logged_in = await platform.ensure_logged_in()
             if not logged_in:
-                print("Failed to log in. Exiting.")
+                console.print("[red]登录失败，退出[/red]")
                 await platform.shutdown()
                 return
-            
-            # 找桌坐下
+
             table_id = await platform.open_table()
             if not table_id:
-                print("No table available. Exiting.")
+                console.print("[red]无可用桌子，退出[/red]")
                 await platform.shutdown()
                 return
-            
+
             await asyncio.sleep(2)
             await platform.try_sit_down(table_id)
-            
-            # 开始自动游戏循环
+
             from src.strategies import get_strategy
+            from src.core.interfaces import GameAction, ActionType
+
             strategy = get_strategy(config.strategy_type)
-            
+
             while True:
                 state = await platform.get_game_state(table_id)
                 actions = await platform.get_available_actions(table_id)
-                
+
                 if actions.get("available"):
-                    # 由策略决定动作
                     decision = strategy.decide(state, actions)
                     if decision:
-                        action_type = decision.get("action")
+                        action_type_str = decision.get("action")
                         amount = decision.get("amount", 0)
-                        
-                        from src.core.interfaces import GameAction, ActionType
                         action_map = {
                             "fold": ActionType.FOLD,
                             "check": ActionType.CHECK,
@@ -987,17 +394,93 @@ async def main():
                             "bet": ActionType.BET,
                         }
                         action = GameAction(
-                            action_type=action_map.get(action_type, ActionType.FOLD),
-                            amount=amount
+                            action_type=action_map.get(action_type_str, ActionType.FOLD),
+                            amount=amount,
                         )
                         await platform.execute_action(action, table_id)
-                        print(f"Action: {action_type} {amount}")
+                        console.print(f"动作: {action_type_str} {amount}")
                         await asyncio.sleep(3)
                 else:
                     await asyncio.sleep(1)
-        
         finally:
             await platform.shutdown()
+
+
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description="德州扑克 AI")
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        choices=["cli", "auto", "arena", "mtt", "sng"],
+        default=None,
+        help="运行模式: cli/auto/arena/mtt/sng"
+    )
+    parser.add_argument("--headless", action="store_true", help="浏览器无头模式")
+    parser.add_argument("--stakes", help="偏好盲注级别 (如 1/2, 5/10)")
+    parser.add_argument("--strategy", choices=["fifo", "most", "least", "random"], help="桌子选择策略")
+    parser.add_argument("--arena-hands", type=int, default=100, help="Arena 模式手数")
+    parser.add_argument("--arena-players", type=int, default=3, help="Arena 模式玩家数")
+    # MTT 参数
+    parser.add_argument("--mtt-entries", type=int, default=18, help="MTT 参赛人数")
+    parser.add_argument("--mtt-blinds", choices=["standard", "turbo", "deepstack"], default="standard", help="MTT 盲注结构")
+    parser.add_argument("--mtt-prize", type=str, default=None, help="MTT 奖金分配 (如 '50,30,20')")
+    parser.add_argument("--mtt-stack", type=int, default=1000, help="MTT 起始筹码")
+    parser.add_argument("--mtt-fee", type=int, default=100, help="MTT 买入费")
+    # SNG 参数
+    parser.add_argument("--sng-preset", choices=["hu", "6max", "9max", "10max"], default=None, help="SNG 类型")
+    parser.add_argument("--sng-blinds", choices=["standard", "turbo"], default="turbo", help="SNG 盲注结构")
+    parser.add_argument("--sng-stack", type=int, default=1500, help="SNG 起始筹码")
+    parser.add_argument("--sng-fee", type=int, default=50, help="SNG 买入费")
+    return parser.parse_args()
+
+
+async def main():
+    args = parse_args()
+
+    # MTT 模式（同步运行，不需要 async）
+    if args.mode == "mtt":
+        run_mtt(args)
+        return
+
+    # SNG 模式
+    if args.mode == "sng":
+        run_sng(args)
+        return
+
+    # 如果直接指定了 arena 模式，跳过交互选择
+    if args.mode == "arena":
+        from src.platforms.arena.platform import ArenaConfig, ArenaPlayerConfig
+
+        players = []
+        strategies = ["gto", "range", "exploitative"]
+        for i in range(min(args.arena_players, 6)):
+            players.append(ArenaPlayerConfig(
+                name=f"Player{i + 1}",
+                strategy=strategies[i % len(strategies)],
+                initial_stack=1000,
+            ))
+        config = ArenaConfig(players=players, max_rounds=args.arena_hands)
+        await run_arena(config)
+        return
+
+    # 如果直接指定了 cli/auto 模式，直接进入浏览器模式
+    if args.mode in ("cli", "auto"):
+        await run_browser(args)
+        return
+
+    # 无参数：交互式选择平台
+    platform_type = select_platform()
+
+    if platform_type == "arena":
+        config = configure_arena()
+        await run_arena(config)
+    elif platform_type == "mtt":
+        run_mtt()
+    elif platform_type == "sng":
+        run_sng()
+    elif platform_type == "browser":
+        await run_browser(args)
 
 
 if __name__ == "__main__":

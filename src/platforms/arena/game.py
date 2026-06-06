@@ -38,7 +38,8 @@ class PlayerState:
     is_all_in: bool = False
     bet_this_street: int = 0
     total_investment: int = 0  # 本手牌总投入
-    
+    player_id: str = ""  # 全局唯一玩家标识（MTT 用）
+
     def __repr__(self):
         return f"Player(Seat {self.seat_id}, {self.name}, Stack: {self.stack})"
 
@@ -86,26 +87,38 @@ class GameEngine:
                 p.hole_cards = self.deck.draw(2)
                 arena_logger.info(f"玩家 {p.name} (座:{p.seat_id}) 手牌: {[Card.int_to_str(c) for c in p.hole_cards]}")
                 
-    def post_blinds(self) -> List[int]:
-        """缴纳盲注，返回当前需要行动的玩家索引"""
+    def post_blinds(self, ante: int = 0) -> List[int]:
+        """缴纳盲注（含 ante），返回当前需要行动的玩家索引"""
         num_players = len(self.players)
         sb_idx = (self.dealer_idx + 1) % num_players
         bb_idx = (self.dealer_idx + 2) % num_players
-        
+
         # 处理只有两人的情况（Heads-up）
         if num_players == 2:
             sb_idx = self.dealer_idx
             bb_idx = (self.dealer_idx + 1) % num_players
-            
+
+        # 缴纳 ante
+        if ante > 0:
+            for p in self.players:
+                if p.is_active:
+                    actual_ante = min(ante, p.stack)
+                    p.stack -= actual_ante
+                    p.total_investment += actual_ante
+                    self.pot += actual_ante
+                    if p.stack == 0:
+                        p.is_all_in = True
+            arena_logger.info(f"Ante: 每人 {ante}")
+
         self._bet(sb_idx, self.small_blind)
         self._bet(bb_idx, self.big_blind)
-        
+
         self.current_bet = self.big_blind
         self.last_raiser_idx = bb_idx
         self.min_raise = self.big_blind
-        
+
         arena_logger.info(f"玩家 {self.players[sb_idx].name} 缴纳小盲 {self.small_blind}, 玩家 {self.players[bb_idx].name} 缴纳大盲 {self.big_blind}")
-        
+
         return (bb_idx + 1) % num_players
 
     def _bet(self, player_idx: int, amount: int):
@@ -177,21 +190,32 @@ class GameEngine:
             self.community_cards = self.deck.draw(3)
             arena_logger.info(f"--- 翻牌 (FLOP): {[Card.int_to_str(c) for c in self.community_cards]} | 底池: {self.pot} ---")
         elif self.current_street == Street.TURN:
-            self.community_cards.append(self.deck.draw(1))
+            self.community_cards.extend(self.deck.draw(1))
             arena_logger.info(f"--- 转牌 (TURN): {[Card.int_to_str(c) for c in self.community_cards]} | 底池: {self.pot} ---")
         elif self.current_street == Street.RIVER:
-            self.community_cards.append(self.deck.draw(1))
+            self.community_cards.extend(self.deck.draw(1))
             arena_logger.info(f"--- 河牌 (RIVER): {[Card.int_to_str(c) for c in self.community_cards]} | 底池: {self.pot} ---")
             
     def get_winners(self) -> List[Tuple[int, int]]:
-        """计算最终赢家和分配金额。简化版：暂不处理复杂的边池情况。"""
+        """计算最终赢家和分配金额。支持边池分配。"""
         active_players = [p for p in self.players if p.is_active]
         if len(active_players) == 1:
             winner = active_players[0]
             arena_logger.info(f"所有其他玩家已弃牌，玩家 {winner.name} 赢得底池 {self.pot}")
             return [(winner.seat_id, self.pot)]
-            
-        # 比牌逻辑
+
+        # 检测是否有 all-in 玩家需要边池计算
+        all_in_players = [p for p in self.players if p.is_all_in and p.total_investment > 0]
+        has_side_pot = len(all_in_players) > 0 and len(active_players) > 1
+
+        if has_side_pot:
+            return self._get_winners_with_side_pots(active_players)
+
+        # 简化版：无 all-in 或全部 all-in 同额，直接比牌
+        return self._get_winners_simple(active_players)
+
+    def _get_winners_simple(self, active_players: List[PlayerState]) -> List[Tuple[int, int]]:
+        """简化版赢家计算（无边池）"""
         scores = []
         for p in active_players:
             score = self.evaluator.evaluate(self.community_cards, p.hole_cards)
@@ -199,16 +223,42 @@ class GameEngine:
             class_str = self.evaluator.class_to_string(rank_class)
             arena_logger.info(f"玩家 {p.name} 摊牌: {[Card.int_to_str(c) for c in p.hole_cards]} -> {class_str}")
             scores.append((score, p))
-            
+
         scores.sort(key=lambda x: x[0])
         best_score = scores[0][0]
         winners = [x[1] for x in scores if x[0] == best_score]
-        
-        # 分摊底池
+
         win_amount = self.pot // len(winners)
         results = []
         for w in winners:
             arena_logger.info(f"玩家 {w.name} 赢得底池 {win_amount}")
             results.append((w.seat_id, win_amount))
-            
+
         return results
+
+    def _get_winners_with_side_pots(self, active_players: List[PlayerState]) -> List[Tuple[int, int]]:
+        """使用边池模块计算赢家分配"""
+        from .side_pot import calculate_side_pots, distribute_pots
+
+        # 收集所有参与者的投资
+        investments = [(p.seat_id, p.total_investment)
+                       for p in self.players if p.is_active or p.is_all_in]
+
+        pots = calculate_side_pots(investments)
+        hole_cards_map = {p.seat_id: p.hole_cards for p in active_players}
+
+        results = distribute_pots(pots, hole_cards_map, self.community_cards, self.evaluator)
+
+        # 日志输出
+        for seat_id, amount in results:
+            p = self.players[seat_id] if seat_id < len(self.players) else None
+            name = p.name if p else f"Seat {seat_id}"
+            arena_logger.info(f"玩家 {name} 赢得 {amount} (边池分配)")
+
+        return results
+
+    def update_blinds(self, sb: int, bb: int):
+        """更新盲注级别（手间调用）"""
+        self.small_blind = sb
+        self.big_blind = bb
+        self.min_raise = bb

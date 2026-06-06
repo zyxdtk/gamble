@@ -4,18 +4,20 @@ from treys import Card
 from src.strategies.game_state import GameState, Player as StrategyPlayer
 from src.strategies.strategy_base import Strategy
 from src.strategies.action_plan import ActionType as StrategyActionType
-from src.arena.game import PlayerState, Street, ActionType as ArenaActionType
+from src.platforms.arena.game import PlayerState, Street, ActionType as ArenaActionType
 
 arena_logger = logging.getLogger("arena")
 
 
 class ArenaAgent:
     """策略适配层：连接模拟器与 Strategy 策略"""
-    def __init__(self, seat_id: int, strategy: Strategy):
+    def __init__(self, seat_id: int, strategy: Strategy, player_id: str = ""):
         self.seat_id = seat_id
         self.strategy = strategy
+        self.player_id = player_id
         self.name = f"{strategy.strategy_name.capitalize()}_{seat_id}"
         # 维护场上所有玩家的全局画像统计（在 Arena 模式下模拟历史记忆）
+        # 索引方式: seat_id (ring game) 或 player_id (MTT)
         self.global_player_stats = {} # {seat_id: {hands: 0, vpip: 0, pfr: 0}}
         
     def get_action(self, arena_state: 'GameEngine') -> Tuple[ArenaActionType, int]:

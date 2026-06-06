@@ -1,5 +1,5 @@
 import pytest
-from src.arena.game import GameEngine, ActionType, Street
+from src.platforms.arena.game import GameEngine, ActionType, Street
 
 def test_game_initialization():
     players = [{'name': 'A', 'stack': 1000}, {'name': 'B', 'stack': 1000}]

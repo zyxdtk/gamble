@@ -3,13 +3,13 @@ import os
 import time
 from pathlib import Path
 from typing import List, Dict
-from src.arena.game import GameEngine, Street, ActionType
-from src.arena.agent import ArenaAgent
+from src.platforms.arena.game import GameEngine, Street, ActionType
+from src.platforms.arena.agent import ArenaAgent
 from src.strategies.strategies.balanced import BalancedStrategy
 from src.strategies.strategies.exploitative import ExploitativeStrategy
 from src.strategies.strategies.range import RangeStrategy
 from src.strategies.strategies.check_or_fold import CheckOrFoldStrategy
-from src.strategies.strategies.neural import NeuralStrategy
+from src.strategies.strategies.aggressive import AggressiveStrategy
 from src.utils.logger import arena_logger
 
 
@@ -62,9 +62,15 @@ class Competition:
         elif strategy_type == "exploitative":
             return ExploitativeStrategy(thinking_timeout=timeout)
         elif strategy_type == "neural":
+            from src.strategies.strategies.neural import NeuralStrategy
             return NeuralStrategy(thinking_timeout=timeout)
         elif strategy_type == "checkorfold":
             return CheckOrFoldStrategy()
+        elif strategy_type == "aggressive":
+            return AggressiveStrategy(thinking_timeout=timeout)
+        elif strategy_type == "icm":
+            from src.strategies.strategies.icm import ICMStrategy
+            return ICMStrategy(thinking_timeout=timeout)
         else:
             return RangeStrategy()
 
