@@ -33,6 +33,8 @@ class GameState:
     hole_cards: List[str] = field(default_factory=list)
     community_cards: List[str] = field(default_factory=list)
     pot: int = 0
+    pot_rake: int = 0  # 抽税后底池（实际可赢筹码）
+    rake: int = 0      # 平台抽税金额
     current_dealer_seat: Optional[int] = None
     my_seat_id: Optional[int] = None
     active_seat: Optional[int] = None

@@ -30,6 +30,14 @@ __all__ = [
     "SNGConfig",
     "SNGReport",
     "SNGPlayerStats",
+    # Ring
+    "RingPlatform",
+    "RingConfig",
+    "RingPlayerConfig",
+    "RingReport",
+    "RingPlayerStats",
+    "CLIRingPlayer",
+    "CLITournamentPlayer",
 ]
 
 
@@ -94,4 +102,26 @@ def __getattr__(name):
     elif name == "SNGPlayerStats":
         from .sitngo import SNGPlayerStats
         return SNGPlayerStats
+    # Ring 相关
+    elif name == "RingPlatform":
+        from .ring import RingPlatform
+        return RingPlatform
+    elif name == "RingConfig":
+        from .ring import RingConfig
+        return RingConfig
+    elif name == "RingPlayerConfig":
+        from .ring import RingPlayerConfig
+        return RingPlayerConfig
+    elif name == "RingReport":
+        from .ring import RingReport
+        return RingReport
+    elif name == "RingPlayerStats":
+        from .ring import RingPlayerStats
+        return RingPlayerStats
+    elif name == "CLIRingPlayer":
+        from .ring_cli import CLIRingPlayer
+        return CLIRingPlayer
+    elif name == "CLITournamentPlayer":
+        from .tournament_cli import CLITournamentPlayer
+        return CLITournamentPlayer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

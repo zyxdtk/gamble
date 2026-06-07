@@ -16,28 +16,29 @@ class ArenaAgent:
         self.strategy = strategy
         self.player_id = player_id
         self.name = f"{strategy.strategy_name.capitalize()}_{seat_id}"
+        self.is_human = False
         # 维护场上所有玩家的全局画像统计（在 Arena 模式下模拟历史记忆）
         # 索引方式: seat_id (ring game) 或 player_id (MTT)
         self.global_player_stats = {} # {seat_id: {hands: 0, vpip: 0, pfr: 0}}
-        
-    def get_action(self, arena_state: 'GameEngine') -> Tuple[ArenaActionType, int]:
+
+    async def get_action(self, arena_state: 'GameEngine') -> Tuple[ArenaActionType, int]:
         """根据当前竞技场状态，调用 Strategy 获取动作"""
         # 1. 构造 GameState
         game_state = self._translate_state(arena_state)
-        
+
         # 2. 调用 Strategy 决策 (使用最新的统一接口)
         plan = self.strategy.make_decision(game_state)
-        
+
         # 3. 记录思考日志
         arena_logger.info(f"[THINK] 玩家 {self.name} (座:{self.seat_id}): {plan.reasoning}")
-        
+
         # 4. 解析决策
         to_call = arena_state.current_bet - arena_state.players[self.seat_id].bet_this_street
         action_type, amount = plan.get_action_for_bet(to_call, arena_state.pot)
-        
+
         # 5. 转换为 Arena 内部动作
         arena_action = self._translate_action(action_type)
-        
+
         return arena_action, amount
 
     def observe_action(self, seat_id: int, action: ArenaActionType, amount: int, pot: int):

@@ -28,6 +28,7 @@ class MTTPlayerConfig:
     name: str
     strategy: str  # "gto", "range", "exploitative", "checkorfold", "aggressive", "neural", "icm"
     starting_stack: int = 1000
+    is_human: bool = False
 
 
 @dataclass
@@ -176,7 +177,7 @@ class MTTManager:
 
         arena_logger.info(f"初始分配: {num_tables} 桌, {len(player_ids)} 人")
 
-    def run(self) -> MTTReport:
+    async def run(self) -> MTTReport:
         """运行完整锦标赛"""
         start_time = time.time()
 
@@ -225,7 +226,7 @@ class MTTManager:
             all_busted: List[Tuple[str, int]] = []
             for table in self.tables:
                 if table.player_count >= 2:
-                    busted = table.play_hand(blind_level)
+                    busted = await table.play_hand(blind_level)
                     all_busted.extend(busted)
 
             self._global_hand_idx += 1

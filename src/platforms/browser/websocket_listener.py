@@ -69,15 +69,18 @@ class WebSocketListener:
         try:
             import time
             self._last_ws_time = time.time()
-            
+
             payload = frame.text if hasattr(frame, 'text') else str(frame)
             if not payload.startswith("["):
                 return
-            
+
+            # 记录原始 WS 消息到文件日志（方便调试）
+            bot_logger.debug(f"WS raw: {payload[:500]}")
+
             data = json.loads(payload)
             if len(data) < 5 or data[3] != "output":
                 return
-            
+
             await self._process_game_message(data[4])
         except Exception as e:
             bot_logger.debug(f"WS frame processing error: {e}")
@@ -129,10 +132,13 @@ class WebSocketListener:
                     self.state["community_cards"] = c_cards
                     bot_logger.debug(f"WS: Community Cards updated: {c_cards}")
         
+        # 注意：update 中的 "pot" 单字段可能只是当前轮下注，不是累计总底池
+        # 只有当它大于当前已知值时才更新（底池只会增长）
+        # 准确的总底池由 updatePots action 从 pots 数组求和得出
         if "pot" in update:
             new_pot = update.get("pot")
-            if new_pot is not None:
-                self.state["pot"] = new_pot
+            if isinstance(new_pot, (int, float)) and new_pot > self.state["pot"]:
+                self.state["pot"] = int(new_pot)
         
         if not action:
             return
@@ -147,20 +153,29 @@ class WebSocketListener:
         elif action == "dealCommunityCards":
             cards = update.get("cards")
             if isinstance(cards, list) and len(cards) > 0:
-                self.state["community_cards"] = cards
-                bot_logger.info(f"WS: Received Community Cards: {cards}")
+                # 累积追加：flop发3张，turn/river各发1张，WS每轮只发新牌
+                existing = self.state["community_cards"]
+                for card in cards:
+                    if card not in existing:
+                        existing.append(card)
+                self.state["community_cards"] = existing
+                bot_logger.info(f"WS: Community Cards updated: {existing}")
         
         elif action in ["updatePots", "awardPot"]:
             pots = update.get("pots", [])
             self.state["pot"] = sum(p.get("chips", 0) for p in pots)
             if action == "awardPot":
-                # 手牌结束，重置部分状态
-                self.state["community_cards"] = []
+                # 不在此处清空 community_cards，边池场景下会连续触发多次 awardPot，
+                # 之后的 dealCommunityCards 会追加到空列表。改由 startHand/resetTable 重置。
                 self.state["pot"] = 0
         
         elif action == "startHand":
-            # 新手牌开始
+            # 新手牌开始，重置公共牌和底池
             self.state["hand_id"] = update.get("id", 0)
+            self.state["community_cards"] = []
+            self.state["pot"] = 0
+            self.state["to_call"] = 0
+            self.state["min_raise"] = 0
             if "dealerSeat" in update:
                 self.state["dealer_seat"] = update.get("dealerSeat")
             bot_logger.info(f"WS: New hand started (ID: {self.state['hand_id']})")
@@ -174,19 +189,28 @@ class WebSocketListener:
             seat = current_player.get("seatId") or current_player.get("seat")
             if seat is not None:
                 self.state["active_seat"] = seat
-                
+
                 # 判断是否轮到我
                 if self.state["my_seat_id"] is not None:
                     self.state["is_my_turn"] = (seat == self.state["my_seat_id"])
-                
+
                 # 更新玩家的 is_acting 标志
                 for s, player in self.state["players"].items():
                     player["is_acting"] = (s == seat)
-                
+
                 # 保存游戏阶段
                 ws_state = update.get("state", "")
                 if ws_state:
                     self.state["current_stage"] = ws_state.lower()
+
+            # 提取跟注/加注金额（WS 结构化数据，比 DOM 更可靠）
+            call_amount = update.get("callAmount")
+            if call_amount is not None:
+                self.state["to_call"] = int(call_amount)
+
+            min_raise = update.get("minimumRaise") or update.get("minRaise")
+            if min_raise is not None:
+                self.state["min_raise"] = int(min_raise)
     
     async def _handle_deal_hole_cards(self, update: Dict):
         """处理发底牌消息，自动识别自己的座位"""

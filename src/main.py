@@ -31,20 +31,23 @@ AVAILABLE_STRATEGIES = ["gto", "range", "exploitative", "checkorfold", "aggressi
 def select_platform() -> str:
     """交互式选择平台"""
     table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_row("1.", "Arena  (本地模拟对抗)")
-    table.add_row("2.", "Browser (浏览器在线对战)")
-    table.add_row("3.", "MTT    (多桌锦标赛)")
-    table.add_row("4.", "SNG    (Sit & Go 单桌赛)")
+    table.add_row("1.", "Arena       (本地模拟对抗)")
+    table.add_row("2.", "MTT         (多桌锦标赛)")
+    table.add_row("3.", "SNG         (Sit & Go 单桌赛)")
+    table.add_row("4.", "Ring        (无限注现金桌)")
+    table.add_row("5.", "ReplayPoker (浏览器在线对战)")
 
     console.print(Panel(table, title="选择平台", border_style="cyan"))
-    choice = Prompt.ask("请选择", choices=["1", "2", "3", "4"], default="1")
+    choice = Prompt.ask("请选择", choices=["1", "2", "3", "4", "5"], default="1")
     if choice == "1":
         return "arena"
-    elif choice == "3":
+    elif choice == "2":
         return "mtt"
-    elif choice == "4":
+    elif choice == "3":
         return "sng"
-    return "browser"
+    elif choice == "4":
+        return "ring"
+    return "replaypoker"
 
 
 def configure_arena():
@@ -108,7 +111,7 @@ def configure_browser(args) -> dict:
         config.table_selection_strategy = strategy_map[args.strategy]
     config.headless = args.headless
 
-    return {"config": config, "mode": args.mode}
+    return {"config": config, "cli_mode": getattr(args, 'cli', False)}
 
 
 def print_report(report):
@@ -173,9 +176,11 @@ def configure_mtt():
     )
 
 
-def run_mtt(args=None):
+async def run_mtt(args=None):
     """运行 MTT 锦标赛"""
     from src.platforms.arena.mtt import MTTConfig, MTTPlayerConfig, PrizePayout, MTTManager
+
+    has_human = getattr(args, 'human', False) if args else False
 
     if args and args.mtt_entries:
         entries = args.mtt_entries
@@ -204,17 +209,32 @@ def run_mtt(args=None):
     strategies = ["gto", "range", "exploitative", "checkorfold", "aggressive"]
     player_configs = []
     for i in range(config.entries):
+        is_human = has_human and i == 0
         player_configs.append(MTTPlayerConfig(
-            name=f"Player{i + 1}",
+            name="You" if is_human else f"Player{i + 1}",
             strategy="mixed",
             starting_stack=config.starting_stack,
+            is_human=is_human,
         ))
 
     manager.register_players(player_configs)
     manager.initial_seating()
 
+    # 人类玩家替换
+    if has_human:
+        from src.platforms.arena.tournament_cli import CLITournamentPlayer
+        for pid, agent in manager.player_agents.items():
+            pc = None
+            for i, cfg in enumerate(manager.player_configs):
+                if f"mtt_p{i}" == pid:
+                    pc = cfg
+                    break
+            if pc and pc.is_human:
+                CLITournamentPlayer.create(agent)
+                console.print(f"[bold cyan]{agent.name} 已切换为 CLI 人类玩家[/bold cyan]")
+
     console.print("\n[bold green]MTT 锦标赛开始...[/bold green]\n")
-    report = manager.run()
+    report = await manager.run()
     print_mtt_report(report)
     return report
 
@@ -270,10 +290,116 @@ def configure_sng():
     )
 
 
-def run_sng(args=None):
+def configure_ring():
+    """交互式配置 Ring Game"""
+    from src.platforms.arena.ring import RingConfig, RingPlayerConfig
+
+    console.print()
+    num_players = IntPrompt.ask("玩家数量", default=4, choices=[str(i) for i in range(2, 10)])
+
+    players: list[RingPlayerConfig] = []
+    for i in range(num_players):
+        console.print(f"\n[bold]Player {i + 1}:[/bold]")
+        name = Prompt.ask("  名称", default=f"Player{i + 1}")
+        hand_strategy = Prompt.ask(
+            f"  手牌策略 ({'/'.join(AVAILABLE_STRATEGIES)})",
+            choices=AVAILABLE_STRATEGIES,
+            default=AVAILABLE_STRATEGIES[i % len(AVAILABLE_STRATEGIES)]
+        )
+        table_strategy = Prompt.ask(
+            "  桌位策略 (default/conservative/aggressive)",
+            choices=["default", "conservative", "aggressive"],
+            default="default",
+        )
+        initial_bank = IntPrompt.ask("  初始银行", default=2000)
+        buyin_amount = IntPrompt.ask("  买入金额", default=200)
+        players.append(RingPlayerConfig(
+            name=name,
+            hand_strategy=hand_strategy,
+            table_strategy=table_strategy,
+            initial_bank=initial_bank,
+            buyin_amount=buyin_amount,
+        ))
+
+    small_blind = IntPrompt.ask("小盲", default=1)
+    big_blind = IntPrompt.ask("大盲", default=2)
+    max_rounds = IntPrompt.ask("最大手数", default=200)
+
+    return RingConfig(
+        players=players,
+        small_blind=small_blind,
+        big_blind=big_blind,
+        max_rounds=max_rounds,
+    )
+
+
+async def run_ring(config, has_human=False):
+    """运行 Ring Game"""
+    from src.platforms.arena.ring import RingPlatform, RingPlayer
+    from src.core.messaging import AsyncChannel, Message, MessageType
+
+    platform = RingPlatform(config)
+    await platform.initialize()
+
+    # 如果有人类玩家，将对应 RingPlayer 的决策钩子替换为 CLI 输入
+    if has_human:
+        from src.platforms.arena.ring_cli import CLIRingPlayer
+        for i, pc in enumerate(config.players):
+            if pc.is_human:
+                player_id = f"ring_player_{i}"
+                player = platform.players[player_id]
+                CLIRingPlayer.create(player)
+                console.print(f"[bold cyan]{player.name} 已切换为 CLI 人类玩家[/bold cyan]")
+
+    console.print("\n[bold green]Ring Game 开始...[/bold green]\n")
+    report = await platform.run()
+    print_ring_report(report)
+    await platform.shutdown()
+
+
+def print_ring_report(report):
+    """用 rich 输出 Ring Game 报告"""
+    from src.platforms.arena.ring import RingReport
+
+    table = Table(title="Ring Game 报告", show_lines=True)
+    table.add_column("玩家", style="bold")
+    table.add_column("手牌策略")
+    table.add_column("桌位策略")
+    table.add_column("桌上筹码", justify="right")
+    table.add_column("银行", justify="right")
+    table.add_column("总盈亏", justify="right")
+    table.add_column("VPIP%", justify="right")
+    table.add_column("PFR%", justify="right")
+    table.add_column("胜手", justify="right")
+
+    for ps in report.player_stats:
+        profit_style = "green" if ps.total_profit > 0 else ("red" if ps.total_profit < 0 else "white")
+        table.add_row(
+            ps.name,
+            ps.strategy,
+            ps.table_strategy_name,
+            str(ps.final_chips),
+            str(ps.final_bank),
+            f"[{profit_style}]{ps.total_profit:+d}[/{profit_style}]",
+            f"{ps.vpip:.1f}",
+            f"{ps.pfr:.1f}",
+            str(ps.hands_won),
+        )
+
+    console.print()
+    console.print(Panel(
+        f"总手数: {report.num_hands}  |  持续时间: {report.duration_sec:.1f}s",
+        border_style="cyan"
+    ))
+    console.print(table)
+
+
+async def run_sng(args=None):
     """运行 Sit & Go 单桌赛"""
     from src.platforms.arena.sitngo import SNGConfig, SitAndGo
     from src.platforms.arena.mtt import MTTPlayerConfig
+
+    has_human = getattr(args, 'human', False) if args else False
 
     if args and hasattr(args, 'sng_preset') and args.sng_preset:
         config = SNGConfig(
@@ -289,17 +415,32 @@ def run_sng(args=None):
     strategies = ["gto", "range", "aggressive", "checkorfold", "exploitative", "icm"]
     player_configs = []
     for i in range(config.num_players):
+        is_human = has_human and i == 0
         player_configs.append(MTTPlayerConfig(
-            name=f"Player{i + 1}",
+            name="You" if is_human else f"Player{i + 1}",
             strategy=strategies[i % len(strategies)],
             starting_stack=config.starting_stack,
+            is_human=is_human,
         ))
 
     manager.register_players(player_configs)
     manager.initial_seating()
 
+    # 人类玩家替换
+    if has_human:
+        from src.platforms.arena.tournament_cli import CLITournamentPlayer
+        for pid, agent in manager.player_agents.items():
+            pc = None
+            for i, cfg in enumerate(manager.player_configs):
+                if f"sng_p{i}" == pid:
+                    pc = cfg
+                    break
+            if pc and pc.is_human:
+                CLITournamentPlayer.create(agent)
+                console.print(f"[bold cyan]{agent.name} 已切换为 CLI 人类玩家[/bold cyan]")
+
     console.print("\n[bold green]Sit & Go 开始...[/bold green]\n")
-    report = manager.run()
+    report = await manager.run()
     print_sng_report(report)
     return report
 
@@ -336,22 +477,115 @@ def print_sng_report(report):
     console.print(table)
 
 
-async def run_browser(args):
-    """运行浏览器模式"""
+async def _browser_cli_decide(state, actions: dict) -> dict:
+    """浏览器模式人类玩家决策：显示状态，等待终端输入"""
+    import functools
+
+    available = actions.get("available_actions", [])
+    if not available:
+        # 回退：从 actions 里猜测可用动作
+        available = []
+        if actions.get("can_check"):
+            available.append("check")
+        if actions.get("can_call"):
+            available.append("call")
+        if actions.get("can_fold"):
+            available.append("fold")
+        if actions.get("can_raise"):
+            available.append("raise")
+        if actions.get("can_bet"):
+            available.append("bet")
+
+    # 默认动作：check > call > fold
+    default_action = None
+    default_label = ""
+    if "check" in available:
+        default_action = "check"
+        default_label = "check"
+    elif "call" in available:
+        default_action = "call"
+        call_amount = actions.get("call_amount", 0)
+        default_label = f"call ({call_amount})"
+    else:
+        default_action = "fold"
+        default_label = "fold"
+
+    # 显示状态
+    pot = getattr(state, 'pot', 0) if state else 0
+    to_call = actions.get("call_amount", 0)
+    console.print(Panel(
+        f"底池: [bold yellow]{pot}[/bold yellow]  |  需跟注: [bold]{to_call}[/bold]",
+        title="[bold]你的回合 (浏览器)[/bold]",
+        border_style="green",
+    ))
+    actions_display = " | ".join(f"[bold cyan]{a}[/bold cyan]" for a in available)
+    console.print(f"可用动作: {actions_display}")
+    console.print(f"[dim]回车 = {default_label}[/dim]")
+
+    while True:
+        try:
+            loop = asyncio.get_running_loop()
+            cmd_line = await loop.run_in_executor(
+                None, functools.partial(input, f"browser> [{default_label}]: ")
+            )
+            cmd_line = cmd_line.strip().lower()
+
+            if not cmd_line:
+                if default_action:
+                    result = {"action": default_action, "amount": 0}
+                    if default_action == "call":
+                        result["amount"] = actions.get("call_amount", 0)
+                    return result
+                return {"action": "fold", "amount": 0}
+
+            parts = cmd_line.split()
+            cmd = parts[0]
+
+            if cmd == "fold" and "fold" in available:
+                return {"action": "fold", "amount": 0}
+            if cmd == "check" and "check" in available:
+                return {"action": "check", "amount": 0}
+            if cmd == "call" and "call" in available:
+                return {"action": "call", "amount": actions.get("call_amount", 0)}
+            if cmd in ("raise", "bet") and ("raise" in available or "bet" in available):
+                action_name = "raise" if "raise" in available else "bet"
+                if len(parts) > 1:
+                    try:
+                        amount = int(parts[1])
+                        return {"action": action_name, "amount": amount}
+                    except ValueError:
+                        console.print("[red]金额必须是整数[/red]")
+                        continue
+                else:
+                    console.print(f"[red]用法: {action_name} <金额>[/red]")
+                    continue
+            if cmd in ("allin", "all_in"):
+                return {"action": "raise", "amount": 999999}
+
+            console.print(f"[red]无效命令: {cmd}。可用: {', '.join(available)}[/red]")
+
+        except (KeyboardInterrupt, EOFError):
+            return {"action": "fold", "amount": 0}
+
+
+async def run_replaypoker(args):
+    """运行 ReplayPoker 浏览器模式"""
     from src.platforms.browser.browser_platform import BrowserPlatform, BrowserPlatformConfig
-    from src.platforms.browser.adapters import ReplayPokerAdapter, TableInfo, TableFilter
 
     config_data = configure_browser(args)
     config: BrowserPlatformConfig = config_data["config"]
+    cli_mode = config_data["cli_mode"]
+    has_human = getattr(args, 'human', False)
 
-    if config_data["mode"] == "cli":
-        # CLI 交互模式
+    if cli_mode:
+        # 完全手动浏览器控制
         from src.main_browser import BrowserTestCLI
         cli = BrowserTestCLI(config=config, headless=args.headless)
         await cli.run()
     else:
-        # 自动模式
-        console.print("\n[bold]=== 自动模式 ===[/bold]")
+        # 自动/人类模式
+        mode_label = "人类" if has_human else "自动"
+        console.print(f"\n[bold]=== ReplayPoker {mode_label}模式 ===[/bold]")
         config.auto_mode = True
         platform = BrowserPlatform(config=config)
         await platform.initialize()
@@ -382,7 +616,10 @@ async def run_browser(args):
                 actions = await platform.get_available_actions(table_id)
 
                 if actions.get("available"):
-                    decision = strategy.decide(state, actions)
+                    if has_human:
+                        decision = await _browser_cli_decide(state, actions)
+                    else:
+                        decision = strategy.decide(state, actions)
                     if decision:
                         action_type_str = decision.get("action")
                         amount = decision.get("amount", 0)
@@ -412,9 +649,9 @@ def parse_args():
     parser.add_argument(
         "mode",
         nargs="?",
-        choices=["cli", "auto", "arena", "mtt", "sng"],
+        choices=["arena", "mtt", "sng", "ring", "replaypoker"],
         default=None,
-        help="运行模式: cli/auto/arena/mtt/sng"
+        help="运行模式: arena/mtt/sng/ring/replaypoker"
     )
     parser.add_argument("--headless", action="store_true", help="浏览器无头模式")
     parser.add_argument("--stakes", help="偏好盲注级别 (如 1/2, 5/10)")
@@ -432,20 +669,52 @@ def parse_args():
     parser.add_argument("--sng-blinds", choices=["standard", "turbo"], default="turbo", help="SNG 盲注结构")
     parser.add_argument("--sng-stack", type=int, default=1500, help="SNG 起始筹码")
     parser.add_argument("--sng-fee", type=int, default=50, help="SNG 买入费")
+    # Ring 参数
+    parser.add_argument("--ring-hands", type=int, default=100, help="Ring Game 手数")
+    parser.add_argument("--ring-buyin", type=int, default=200, help="Ring Game 买入金额")
+    # 通用参数
+    parser.add_argument("--human", action="store_true", help="启用人类玩家（CLI 交互）")
+    parser.add_argument("--cli", action="store_true", help="ReplayPoker 完全手动浏览器控制")
+    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="WARNING", help="控制台日志级别 (默认: WARNING)")
     return parser.parse_args()
 
 
 async def main():
     args = parse_args()
 
-    # MTT 模式（同步运行，不需要 async）
+    # 设置日志级别
+    from src.utils.logger import set_log_level
+    set_log_level(args.log_level)
+
+    # MTT 模式
     if args.mode == "mtt":
-        run_mtt(args)
+        await run_mtt(args)
         return
 
     # SNG 模式
     if args.mode == "sng":
-        run_sng(args)
+        await run_sng(args)
+        return
+
+    # Ring 模式
+    if args.mode == "ring":
+        from src.platforms.arena.ring import RingConfig, RingPlayerConfig
+
+        strategies = ["gto", "range", "exploitative", "aggressive", "checkorfold"]
+        players = []
+        num_players = 4
+        for i in range(num_players):
+            is_human = args.human and i == 0
+            players.append(RingPlayerConfig(
+                name="You" if is_human else f"Player{i + 1}",
+                hand_strategy="gto" if is_human else strategies[i % len(strategies)],
+                table_strategy="default",
+                initial_bank=2000,
+                buyin_amount=args.ring_buyin,
+                is_human=is_human,
+            ))
+        config = RingConfig(players=players, max_rounds=args.ring_hands)
+        await run_ring(config, has_human=args.human)
         return
 
     # 如果直接指定了 arena 模式，跳过交互选择
@@ -464,9 +733,9 @@ async def main():
         await run_arena(config)
         return
 
-    # 如果直接指定了 cli/auto 模式，直接进入浏览器模式
-    if args.mode in ("cli", "auto"):
-        await run_browser(args)
+    # ReplayPoker 浏览器模式
+    if args.mode == "replaypoker":
+        await run_replaypoker(args)
         return
 
     # 无参数：交互式选择平台
@@ -476,11 +745,14 @@ async def main():
         config = configure_arena()
         await run_arena(config)
     elif platform_type == "mtt":
-        run_mtt()
+        await run_mtt()
     elif platform_type == "sng":
-        run_sng()
-    elif platform_type == "browser":
-        await run_browser(args)
+        await run_sng()
+    elif platform_type == "ring":
+        config = configure_ring()
+        await run_ring(config)
+    elif platform_type == "replaypoker":
+        await run_replaypoker(args)
 
 
 if __name__ == "__main__":

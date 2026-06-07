@@ -34,6 +34,9 @@ class EventType(Enum):
     HOLE_CARDS_DEALT = "hole_cards_dealt"
     COMMUNITY_CARDS_DEALT = "community_cards_dealt"
     
+    # Table actions (Ring Game)
+    TABLE_ACTION = "table_action"
+
     # Platform events
     CONNECTED = "connected"
     DISCONNECTED = "disconnected"

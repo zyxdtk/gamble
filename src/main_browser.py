@@ -450,29 +450,61 @@ class BrowserTestCLI:
     async def cmd_game_state(self):
         """Show game state."""
         state = await self.platform.get_game_state()
-        actions = await self.platform.get_all_visible_actions()
+
+        # 可用动作从 get_available_actions 获取（经过 turn check）
+        actions = await self.platform.get_available_actions()
         available = actions.get('available', [])
 
+        state_lines = [
+            f"Pot: {state.pot}",
+            f"Community Cards: {state.community_cards}",
+            f"My Seat: {state.my_seat_id}",
+            f"To Call: {state.to_call}",
+            f"Min Raise: {state.min_raise}",
+            f"My Turn: {state.is_my_turn}",
+            f"Available Actions: {', '.join(available) if available else '(none)'}",
+        ]
+        if state.pot_rake > 0:
+            state_lines.insert(1, f"Pot (after rake): {state.pot_rake}")
+        if state.rake > 0:
+            state_lines.insert(2, f"Rake: {state.rake}")
+
+        # 写日志
+        bot_logger.info(f"[CLI] state: {' | '.join(state_lines)}")
+
         print(f"\n--- Game State ---")
-        print(f"  Pot: {state.pot}")
-        print(f"  Community Cards: {state.community_cards}")
-        print(f"  My Seat: {state.my_seat_id}")
-        print(f"  To Call: {state.to_call}")
-        print(f"  Min Raise: {state.min_raise}")
-        print(f"  My Turn: {state.is_my_turn}")
-        if available:
-            print(f"  Available Actions: {', '.join(available)}")
-        else:
-            print(f"  Available Actions: (none)")
+        for line in state_lines:
+            print(f"  {line}")
+
+        # 显示玩家状态
+        if state.players:
+            print(f"\n  Players:")
+            for seat_id in sorted(state.players.keys()):
+                p = state.players[seat_id]
+                status_marker = {
+                    "active": "",
+                    "folded": " [FOLD]",
+                    "all_in": " [ALL-IN]",
+                    "sit_out": " [SIT-OUT]",
+                }.get(p.status, f" [{p.status}]")
+                acting = " <-- acting" if p.is_acting else ""
+                me = " (me)" if seat_id == state.my_seat_id else ""
+                name = p.name or f"Seat{seat_id}"
+                print(f"    {seat_id}: {name}{me}  chips={p.chips}{status_marker}{acting}")
+
         print()
 
     async def cmd_available_actions(self):
         """Show available actions (bypasses turn check for debugging)."""
         actions = await self.platform.get_all_visible_actions()
 
+        available = actions.get('available', [])
+
+        # 写日志
+        bot_logger.info(f"[CLI] actions: available={available} to_call={actions.get('to_call', 0)} min_raise={actions.get('min_raise', 0)}")
+
         print(f"\n=== Available Actions ===")
 
-        available = actions.get('available', [])
         if available:
             print(f"Actions:")
             for action in available:
@@ -532,6 +564,9 @@ class BrowserTestCLI:
             game_action.bet_size_hint = preset
 
         success = await self.platform.execute_action(game_action)
+
+        # 写日志
+        bot_logger.info(f"[CLI] action: {action} amount={amount} preset={preset} success={success}")
 
         if amount:
             print(f"\n{action} {amount}: " + ("✓" if success else "✗") + "\n")

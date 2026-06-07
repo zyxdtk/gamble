@@ -371,20 +371,25 @@ class BrowserPlatform(GamePlatform):
         
         # 在新标签页中打开牌桌
         table_page = await self.context.new_page()
+
+        # ⚠️ 必须在页面加载前注册 WS 监听器！
+        # 页面加载时会建立 WebSocket 连接，如果此时监听器还没注册就会错过
+        await self._ensure_state_manager(table_page)
+
         success = await self.adapter.open_table(table_page, table_url)
-        
+
         if not success:
             await table_page.close()
             return None
-        
+
         # 提取桌子 ID 并记录
         table_id = self.adapter.extract_table_id(table_url)
-        
+
         if table_id:
             self.table_pages[table_id] = table_page
             self.adapter.mark_table_visited(table_id)
             bot_logger.info(f"Opened table: {table_id}")
-        
+
         return table_id
     
     async def try_sit_down(
@@ -460,8 +465,8 @@ class BrowserPlatform(GamePlatform):
             return next(iter(self.table_pages.values()))
         return None
     
-    async def _get_merged_state(self, page: Page) -> Dict[str, Any]:
-        """获取双通道合并状态（内部辅助方法）"""
+    async def _ensure_state_manager(self, page: Page) -> StateManager:
+        """确保 StateManager 已初始化且绑定到正确的 page"""
         if self._state_manager is None:
             self._state_manager = StateManager(page)
             await self._state_manager.initialize()
@@ -469,8 +474,12 @@ class BrowserPlatform(GamePlatform):
             await self._state_manager.shutdown()
             self._state_manager = StateManager(page)
             await self._state_manager.initialize()
-        
-        return await self._state_manager.update_state()
+        return self._state_manager
+
+    async def _get_merged_state(self, page: Page) -> Dict[str, Any]:
+        """获取双通道合并状态（内部辅助方法）"""
+        mgr = await self._ensure_state_manager(page)
+        return await mgr.update_state()
     
     def is_healthy(self) -> bool:
         """检查双通道是否健康"""
@@ -488,39 +497,50 @@ class BrowserPlatform(GamePlatform):
         """Get game state for a table (双通道：WebSocket + DOM)."""
         if not self._is_initialized:
             raise RuntimeError("Platform not initialized")
-        
+
         page = self._get_table_page(table_id)
         if not page:
             from ...strategies.game_state import GameState as PokerGameState
             return PokerGameState()
-        
+
         # 使用双通道状态管理器
-        if self._state_manager is None:
-            self._state_manager = StateManager(page)
-            await self._state_manager.initialize()
-        else:
-            # 如果 page 变了（切换了桌子），需要重新初始化
-            if self._state_manager.page != page:
-                await self._state_manager.shutdown()
-                self._state_manager = StateManager(page)
-                await self._state_manager.initialize()
-        
+        await self._ensure_state_manager(page)
         merged_state = await self._state_manager.update_state()
         
         from ...strategies.game_state import GameState as PokerGameState
         state = PokerGameState()
-        
+
         state.pot = merged_state.get("pot", 0)
+        state.pot_rake = merged_state.get("pot_rake", 0)
+        state.rake = merged_state.get("rake", 0)
         state.community_cards = merged_state.get("community_cards", [])
         state.my_seat_id = merged_state.get("my_seat_id")
         state.to_call = merged_state.get("to_call", 0)
         state.min_raise = merged_state.get("min_raise", 0)
         state.hole_cards = merged_state.get("hole_cards", [])
-        
+
+        # 填充玩家状态
+        from ...strategies.game_state import Player
+        ws_players = merged_state.get("players", {})
+        for seat_id_str, p_data in ws_players.items():
+            try:
+                seat_id = int(seat_id_str)
+            except (ValueError, TypeError):
+                continue
+            player = Player(
+                seat_id=seat_id,
+                name=p_data.get("name", ""),
+                chips=p_data.get("chips", 0),
+                status=p_data.get("status", "active"),
+                is_acting=p_data.get("is_acting", False),
+            )
+            if p_data.get("cards"):
+                player.last_action = f"cards={p_data['cards']}"
+            state.players[seat_id] = player
+
         # is_my_turn 由双通道合并决定
         is_my_turn = merged_state.get("is_my_turn", False)
         if is_my_turn and state.my_seat_id is not None:
-            from ...brain.game_state import Player
             if state.my_seat_id not in state.players:
                 state.players[state.my_seat_id] = Player(seat_id=state.my_seat_id)
             state.players[state.my_seat_id].is_acting = True
@@ -529,25 +549,108 @@ class BrowserPlatform(GamePlatform):
         return state
     
     async def get_available_actions(self, table_id: Optional[str] = None) -> Dict[str, Any]:
-        """Get available actions for a table."""
+        """Get available actions for a table (双通道校验，WS 优先快速路径)."""
         page = self._get_table_page(table_id)
         if not page:
             return {"available": []}
-        
-        # 先检查是否轮到自己行动
-        merged_state = await self._get_merged_state(page)
-        if not merged_state.get("is_my_turn", False):
-            return {"available": [], "to_call": 0, "min_raise": 0, "presets": {}}
-        
-        return await self.adapter.get_available_actions(page)
-    
+
+        # 快速路径：直接从 WS 状态判断是否轮到我（无需完整 DOM 更新）
+        ws_state = self._state_manager.ws_listener.get_state() if self._state_manager else {}
+        is_my_turn_ws = ws_state.get("is_my_turn", False)
+
+        if not is_my_turn_ws:
+            # WS 没说轮到我，再用合并状态确认一次
+            merged_state = await self._get_merged_state(page)
+            if not merged_state.get("is_my_turn", False):
+                return {"available": [], "to_call": 0, "min_raise": 0, "presets": {}}
+            ws_state = merged_state
+
+        # 获取 DOM 按钮（现在有超时保护）
+        dom_actions = await self.adapter.get_available_actions(page)
+        result = self._validate_actions_with_ws(dom_actions, ws_state)
+
+        # 关键回退：如果 DOM 没拿到按钮但 WS 确认轮到我，用 WS 数据构造动作
+        if not result.get("available") and is_my_turn_ws:
+            result = self._build_actions_from_ws(ws_state)
+            bot_logger.debug(f"DOM 按钮为空，使用 WS 回退动作: {result}")
+
+        return result
+
     async def get_all_visible_actions(self, table_id: Optional[str] = None) -> Dict[str, Any]:
         """Get all visible actions on the page (bypasses turn check, for CLI)."""
         page = self._get_table_page(table_id)
         if not page:
             return {"available": []}
-        
-        return await self.adapter.get_available_actions(page)
+
+        # 获取 DOM 按钮
+        dom_actions = await self.adapter.get_available_actions(page)
+
+        # 用 WS 状态校验金额（即使不是自己的回合也校验）
+        try:
+            merged_state = await self._get_merged_state(page)
+            return self._validate_actions_with_ws(dom_actions, merged_state)
+        except Exception:
+            return dom_actions
+
+    def _validate_actions_with_ws(
+        self, dom_actions: Dict[str, Any], ws_state: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """用 WS 状态校验 DOM 提取的动作金额"""
+        result = dom_actions.copy()
+
+        # WS 的 to_call 更可靠（来自结构化消息），如果 WS 有值则覆盖 DOM 的
+        ws_to_call = ws_state.get("to_call", 0)
+        dom_to_call = dom_actions.get("to_call", 0)
+        if ws_to_call > 0 and dom_to_call != ws_to_call:
+            bot_logger.debug(
+                f"to_call 校验: WS={ws_to_call}, DOM={dom_to_call}, 使用 WS 值"
+            )
+            result["to_call"] = ws_to_call
+        elif dom_to_call == 0 and ws_to_call > 0:
+            # DOM 没提取到但 WS 有值
+            result["to_call"] = ws_to_call
+
+        # WS 的 min_raise 更可靠
+        ws_min_raise = ws_state.get("min_raise", 0)
+        dom_min_raise = dom_actions.get("min_raise", 0)
+        if ws_min_raise > 0 and dom_min_raise != ws_min_raise:
+            bot_logger.debug(
+                f"min_raise 校验: WS={ws_min_raise}, DOM={dom_min_raise}, 使用 WS 值"
+            )
+            result["min_raise"] = ws_min_raise
+        elif dom_min_raise == 0 and ws_min_raise > 0:
+            result["min_raise"] = ws_min_raise
+
+        return result
+
+    def _build_actions_from_ws(self, ws_state: Dict[str, Any]) -> Dict[str, Any]:
+        """当 DOM 按钮提取失败时，从 WS 状态构造可用动作"""
+        actions = {
+            "available": [],
+            "to_call": 0,
+            "min_raise": 0,
+            "presets": {},
+        }
+
+        to_call = ws_state.get("to_call", 0)
+        min_raise = ws_state.get("min_raise", 0)
+
+        # 基本动作：总是可以 fold
+        actions["available"].append("fold")
+
+        if to_call == 0:
+            # 不需要跟注 → 可以 check
+            actions["available"].append("check")
+        else:
+            # 需要跟注 → 可以 call
+            actions["available"].append("call")
+            actions["to_call"] = to_call
+
+        if min_raise > 0:
+            actions["available"].append("raise")
+            actions["min_raise"] = min_raise
+
+        return actions
     
     async def execute_action(
         self,

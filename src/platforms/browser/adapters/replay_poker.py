@@ -471,6 +471,8 @@ class ReplayPokerAdapter(WebsiteAdapter):
         """Extract game state from ReplayPoker page (DOM only)."""
         state = {
             "pot": 0,
+            "pot_rake": 0,
+            "rake": 0,
             "community_cards": [],
             "my_seat_id": None,
             "is_my_turn": False,
@@ -480,44 +482,63 @@ class ReplayPokerAdapter(WebsiteAdapter):
         }
         try:
             # 1. 提取底池
-            # [FIX] ReplayPoker 使用 .Stack__value 而不是 .Pot__value
-            pot_elem = page.locator(".Stack__value span").first
+            # ReplayPoker 有两个 pot 显示：
+            #   - .Pot__value span: 原始底池（下注总额，在页面上方）
+            #   - .Stack--pot .Stack__value span: 抽税后底池（在公共牌下方）
+            pot_elem = page.locator(".Pot__value span").first
             if await pot_elem.count() > 0:
                 pot_text = await pot_elem.text_content(timeout=500)
                 if pot_text:
-                    val = re.sub(r"[^\d]", "", pot_text)
-                    if val:
-                        state["pot"] = int(val)
+                    m = re.search(r'([\d,]+)', pot_text)
+                    if m:
+                        state["pot"] = int(m.group(1).replace(",", ""))
+
+            pot_rake_elem = page.locator(".Stack--pot .Stack__value span").first
+            if await pot_rake_elem.count() > 0:
+                pot_rake_text = await pot_rake_elem.text_content(timeout=500)
+                if pot_rake_text:
+                    m = re.search(r'([\d,]+)', pot_rake_text)
+                    if m:
+                        state["pot_rake"] = int(m.group(1).replace(",", ""))
+
+            rake_elem = page.locator(".Stack--rake .Stack__value").first
+            if await rake_elem.count() > 0:
+                rake_text = await rake_elem.text_content(timeout=500)
+                if rake_text:
+                    m = re.search(r'([\d,]+)', rake_text)
+                    if m:
+                        state["rake"] = int(m.group(1).replace(",", ""))
             
             # 2. 提取公共牌
             community_cards = []
-            # [FIX] ReplayPoker 的公共牌不在 .CommunityCard 中，需要从聊天消息或 Cards 区域提取
-            # 方法1: 从 Cards 区域提取可见的牌
-            card_elems = page.locator(".Cards .Card--withValue")
+            # [FIX] 只在 Cards__communityCards 内查找，避免匹配手牌的 Card--0/Card--1
+            # 方法1: 从社区牌区域提取可见的牌
+            card_elems = page.locator(".Cards__communityCards .Card--withValue")
             for i in range(await card_elems.count()):
                 card_class = await card_elems.nth(i).get_attribute("class") or ""
-                # 尝试从 class 中提取牌面信息，例如 "Card Card--AS" -> "AS"
-                card_match = re.search(r'Card--([A-Z0-9]+)', card_class)
+                card_match = re.search(r'Card--([A-Z][a-z])', card_class)
                 if card_match:
                     community_cards.append(card_match.group(1))
-            
-            # 方法2: 如果上面没找到，从聊天消息中提取最新的 "Dealt to board"
+
+            # 方法2: 从聊天消息中提取——收集最近一手牌的所有 "Dealt to board" 消息
+            # flop 是 [ 6c 3h 4h ]，turn/river 是逐张 [ 6h ], [ 4s ]
             if not community_cards:
                 chat_messages = page.locator(".ChatMessage--dealer")
-                last_board_msg = None
-                for i in range(await chat_messages.count() - 1, -1, -1):
+                count = await chat_messages.count()
+                for i in range(count - 1, -1, -1):
                     msg = chat_messages.nth(i)
                     msg_text = await msg.text_content()
-                    if msg_text and "Dealt to board:" in msg_text:
-                        last_board_msg = msg_text
+                    if not msg_text:
+                        continue
+                    # 遇到新手牌开始，停止收集
+                    if "Hand [" in msg_text and "started" in msg_text:
                         break
-                
-                if last_board_msg:
-                    # 提取方括号中的牌，如 "Dealt to board: [ 4c 8s 2d ]"
-                    board_match = re.search(r'\[\s*([^\]]+)\s*\]', last_board_msg)
-                    if board_match:
-                        cards_str = board_match.group(1)
-                        community_cards = cards_str.split()
+                    if "Dealt to board:" in msg_text:
+                        board_match = re.search(r'\[\s*([^\]]+)\s*\]', msg_text)
+                        if board_match:
+                            cards_in_msg = board_match.group(1).split()
+                            # 从后往前追加（因为倒序遍历）
+                            community_cards = cards_in_msg + community_cards
             
             state["community_cards"] = community_cards
             
@@ -604,17 +625,20 @@ class ReplayPokerAdapter(WebsiteAdapter):
                 if not btn_text:
                     continue
                 
-                # 提取 Call 按钮的金额
+                # 提取 Call 按钮的金额（精确匹配关键词后的数字）
                 if re.search(r'\bCall\b', btn_text, re.IGNORECASE):
-                    digits = re.sub(r"[^\d]", "", btn_text)
-                    if digits:
-                        state["to_call"] = int(digits)
-                
+                    m = re.search(r'\bCall\s+([\d,]+)', btn_text, re.IGNORECASE)
+                    if m:
+                        state["to_call"] = int(m.group(1).replace(",", ""))
+                    else:
+                        # Call 按钮没有金额 = check 场景，to_call 为 0
+                        state["to_call"] = 0
+
                 # 提取 Raise/Bet 按钮的最小金额
                 if re.search(r'\b(Raise|Bet)\b', btn_text, re.IGNORECASE):
-                    digits = re.sub(r"[^\d]", "", btn_text)
-                    if digits:
-                        state["min_raise"] = int(digits)
+                    m = re.search(r'\b(?:Raise|Bet)\s+(?:to\s+)?([\d,]+)', btn_text, re.IGNORECASE)
+                    if m:
+                        state["min_raise"] = int(m.group(1).replace(",", ""))
         except Exception:
             pass
         return state
@@ -639,13 +663,17 @@ class ReplayPokerAdapter(WebsiteAdapter):
             
             for action_name, button_regex in targets.items():
                 btn = page.get_by_role("button", name=re.compile(button_regex, re.IGNORECASE))
-                if await btn.count() > 0:
-                    first_btn = btn.first
-                    
-                    # [FIX] 多重可见性检查
-                    # 1. 检查是否 visible
-                    if not await first_btn.is_visible():
-                        continue
+                try:
+                    if await btn.count(timeout=2000) > 0:
+                        first_btn = btn.first
+
+                        # [FIX] 多重可见性检查
+                        # 1. 检查是否 visible
+                        if not await first_btn.is_visible(timeout=2000):
+                            continue
+                except Exception:
+                    # 按钮查找超时，跳过
+                    continue
                     
                     # 2. 检查是否在 viewport 内（排除屏幕外的元素）
                     is_in_viewport = await first_btn.evaluate("""
@@ -696,26 +724,34 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     actions["available"].append(action_name)
             
             if "call" in actions["available"]:
-                call_btn = page.get_by_role("button", name=re.compile(r"\bCall\b", re.IGNORECASE)).first
-                label = await call_btn.text_content()
-                if label:
-                    digits = re.sub(r"[^\d]", "", label)
-                    if digits:
-                        actions["to_call"] = int(digits)
-            
+                try:
+                    call_btn = page.get_by_role("button", name=re.compile(r"\bCall\b", re.IGNORECASE)).first
+                    label = await call_btn.text_content(timeout=2000)
+                    if label:
+                        m = re.search(r'\bCall\s+([\d,]+)', label, re.IGNORECASE)
+                        if m:
+                            actions["to_call"] = int(m.group(1).replace(",", ""))
+                        else:
+                            actions["to_call"] = 0
+                except Exception:
+                    pass
+
             raise_btn = None
-            if "raise" in actions["available"]:
-                raise_btn = page.get_by_role("button", name=re.compile(r"\bRaise\b", re.IGNORECASE)).first
-            elif "bet" in actions["available"]:
-                raise_btn = page.get_by_role("button", name=re.compile(r"\bBet\b", re.IGNORECASE)).first
-            
-            if raise_btn:
-                label = await raise_btn.text_content()
-                if label:
-                    digits = re.sub(r"[^\d]", "", label)
-                    if digits:
-                        actions["min_raise"] = int(digits)
-            
+            try:
+                if "raise" in actions["available"]:
+                    raise_btn = page.get_by_role("button", name=re.compile(r"\bRaise\b", re.IGNORECASE)).first
+                elif "bet" in actions["available"]:
+                    raise_btn = page.get_by_role("button", name=re.compile(r"\bBet\b", re.IGNORECASE)).first
+
+                if raise_btn:
+                    label = await raise_btn.text_content(timeout=2000)
+                    if label:
+                        m = re.search(r'\b(?:Raise|Bet)\s+(?:to\s+)?([\d,]+)', label, re.IGNORECASE)
+                        if m:
+                            actions["min_raise"] = int(m.group(1).replace(",", ""))
+            except Exception:
+                pass
+
             # 检测预设按钮
             preset_selectors = {
                 "min": ".Preset--min",
@@ -723,11 +759,14 @@ class ReplayPokerAdapter(WebsiteAdapter):
                 "pot": ".Preset--pot",
                 "max": ".Preset--max"
             }
-            
+
             for preset_name, selector in preset_selectors.items():
-                btn = page.locator(selector)
-                if await btn.count() > 0 and await btn.first.is_visible():
-                    actions["presets"][preset_name] = True
+                try:
+                    btn = page.locator(selector)
+                    if await btn.count(timeout=2000) > 0 and await btn.first.is_visible(timeout=2000):
+                        actions["presets"][preset_name] = True
+                except Exception:
+                    pass
         except Exception as e:
             bot_logger.error(f"Failed to get available actions: {e}")
         return actions
@@ -736,24 +775,24 @@ class ReplayPokerAdapter(WebsiteAdapter):
         """Execute action on ReplayPoker page."""
         try:
             action_lower = action.lower()
-            
+
             if action_lower == "fold":
                 btn = page.get_by_role("button", name=re.compile("Fold", re.IGNORECASE)).first
-                if await btn.count() > 0 and await btn.is_visible():
+                if await btn.count() > 0 and await btn.is_visible(timeout=3000):
                     await asyncio.sleep(0.5)
                     await btn.click()
                     return True
-            
+
             elif action_lower in ["check", "call"]:
                 btn = page.get_by_role("button", name=re.compile("Check", re.IGNORECASE)).first
-                if not (await btn.count() > 0 and await btn.is_visible()):
+                if not (await btn.count() > 0 and await btn.is_visible(timeout=3000)):
                     btn = page.get_by_role("button", name=re.compile("Call", re.IGNORECASE)).first
-                
-                if await btn.count() > 0 and await btn.is_visible():
+
+                if await btn.count() > 0 and await btn.is_visible(timeout=3000):
                     await asyncio.sleep(0.5)
                     await btn.click()
                     return True
-            
+
             elif action_lower in ["raise", "bet"]:
                 # 如果有预设，先点击预设按钮
                 if preset:
@@ -766,7 +805,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     selector = preset_selectors.get(preset)
                     if selector:
                         preset_btn = page.locator(selector).first
-                        if await preset_btn.count() > 0 and await preset_btn.is_visible():
+                        if await preset_btn.count(timeout=3000) > 0 and await preset_btn.is_visible(timeout=3000):
                             await preset_btn.click()
                             await asyncio.sleep(0.3)
                             bot_logger.info(f"Clicked preset button: {preset}")
@@ -779,29 +818,29 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     ]
                     for selector in input_selectors:
                         inp = page.locator(selector).first
-                        if await inp.count() > 0 and await inp.is_visible():
+                        if await inp.count(timeout=3000) > 0 and await inp.is_visible(timeout=3000):
                             await inp.click(click_count=3)
                             await inp.fill(str(amount))
                             await asyncio.sleep(0.3)
                             break
-                
+
                 # 点击 Raise/Bet 按钮
                 btn = page.get_by_role("button", name=re.compile("Raise", re.IGNORECASE)).first
-                if not (await btn.count() > 0 and await btn.is_visible()):
+                if not (await btn.count() > 0 and await btn.is_visible(timeout=3000)):
                     btn = page.get_by_role("button", name=re.compile("Bet", re.IGNORECASE)).first
-                
-                if await btn.count() > 0 and await btn.is_visible():
+
+                if await btn.count() > 0 and await btn.is_visible(timeout=3000):
                     await asyncio.sleep(0.5)
                     await btn.click()
                     return True
-            
+
             elif action_lower in ["all_in", "allin"]:
                 btn = page.get_by_role("button", name=re.compile("All In", re.IGNORECASE)).first
-                if await btn.count() > 0 and await btn.is_visible():
+                if await btn.count() > 0 and await btn.is_visible(timeout=3000):
                     await asyncio.sleep(0.5)
                     await btn.click()
                     return True
-            
+
             return False
         except Exception as e:
             bot_logger.error(f"Failed to execute action {action}: {e}")

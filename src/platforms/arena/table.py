@@ -10,6 +10,7 @@ TournamentTable 包装 GameEngine，提供：
 import logging
 from typing import List, Optional, Dict, Tuple
 
+from treys import Card
 from .game import GameEngine, PlayerState, Street, ActionType
 from .side_pot import calculate_side_pots, distribute_pots, SidePot
 from .blind_schedule import BlindLevel
@@ -58,7 +59,7 @@ class TournamentTable:
         self.agents.pop(seat_id, None)
         return player
 
-    def play_hand(self, blind_level: BlindLevel) -> List[Tuple[str, int]]:
+    async def play_hand(self, blind_level: BlindLevel) -> List[Tuple[str, int]]:
         """
         打一手完整牌局。
 
@@ -102,13 +103,13 @@ class TournamentTable:
         current_idx = engine.post_blinds(ante=blind_level.ante)
 
         # 翻牌前
-        self._betting_loop(engine, current_idx, hand_players, seat_to_idx, idx_to_seat)
+        await self._betting_loop(engine, current_idx, hand_players, seat_to_idx, idx_to_seat)
 
         # 后续街道
         while engine.current_street < Street.RIVER and self._count_active(engine) > 1:
             engine.next_street()
             first_actor = (engine.dealer_idx + 1) % num_players
-            self._betting_loop(engine, first_actor, hand_players, seat_to_idx, idx_to_seat)
+            await self._betting_loop(engine, first_actor, hand_players, seat_to_idx, idx_to_seat)
 
         # 摊牌记录
         if self._count_active(engine) > 1:
@@ -127,6 +128,20 @@ class TournamentTable:
             if seat_id < len(engine.players):
                 engine.players[seat_id].stack += amount
 
+        # 记录人类玩家的手牌结果
+        winner_seats = {ws for ws, _ in winners}
+        for i, ep in enumerate(engine.players):
+            real_seat = idx_to_seat[i]
+            agent = self.agents.get(real_seat)
+            if agent and agent.is_human:
+                is_winner = i in winner_seats
+                win_amount = next((a for s, a in winners if s == i), 0)
+                arena_logger.info(
+                    f"🎮 CLI 手牌结果: {'赢' if is_winner else '输'} "
+                    f"win={win_amount} pot={engine.pot} "
+                    f"board={' '.join(Card.int_to_str(c) for c in engine.community_cards)}"
+                )
+
         # 将 engine 的筹码变化同步回 hand_players -> seats
         busted: List[Tuple[str, int]] = []
         for i, ep in enumerate(engine.players):
@@ -139,7 +154,7 @@ class TournamentTable:
 
         return busted
 
-    def _betting_loop(self, engine: GameEngine, start_idx: int,
+    async def _betting_loop(self, engine: GameEngine, start_idx: int,
                       hand_players: List[PlayerState],
                       seat_to_idx: Dict[int, int],
                       idx_to_seat: Dict[int, int]):
@@ -175,7 +190,7 @@ class TournamentTable:
                 agent = self.agents.get(real_seat)
 
                 if agent:
-                    action, amount = agent.get_action(engine)
+                    action, amount = await agent.get_action(engine)
                     engine.execute_action(current_idx, action, amount)
                 else:
                     # 无 agent 默认弃牌

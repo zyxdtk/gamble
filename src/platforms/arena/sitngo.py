@@ -159,7 +159,7 @@ class SitAndGo:
 
         arena_logger.info(f"SNG: 座位分配完成, {self.table.player_count} 人")
 
-    def run(self) -> SNGReport:
+    async def run(self) -> SNGReport:
         """运行完整 Sit & Go"""
         start_time = time.time()
 
@@ -198,7 +198,7 @@ class SitAndGo:
                 last_blind_level = level_idx
 
             # 打一手
-            busted = self.table.play_hand(blind_level)
+            busted = await self.table.play_hand(blind_level)
             self._hand_idx += 1
 
             # 处理淘汰
