@@ -322,15 +322,19 @@ class ReplayPokerAdapter(WebsiteAdapter):
         try:
             # 等待 buy-in 弹窗出现
             await asyncio.sleep(0.5)
-            
+
             # 方法1: 通过类名查找 Min 按钮
             min_btn = page.locator(".BuyInModal__preset--min")
             if await min_btn.count() > 0 and await min_btn.is_visible():
+                # disabled 说明当前 amount 已经是 min，状态已满足，无需点击
+                if await min_btn.is_disabled():
+                    bot_logger.info("Min buy-in 按钮已 disabled（当前就是 min），跳过")
+                    return True
                 await min_btn.click()
                 await asyncio.sleep(0.3)
                 bot_logger.info("Selected minimum buy-in (by class)")
                 return True
-            
+
             # 方法2: 通过包含 "Min" 的按钮文本查找（限制在 buy-in 弹窗内）
             buyin_modal = page.locator(".BuyInModal").first
             if await buyin_modal.count() > 0:
@@ -339,41 +343,50 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     for i in range(await min_text_btn.count()):
                         btn = min_text_btn.nth(i)
                         if await btn.is_visible():
+                            if await btn.is_disabled():
+                                bot_logger.info("Min buy-in 按钮已 disabled（当前就是 min），跳过")
+                                return True
                             await btn.click()
                             await asyncio.sleep(0.3)
                             bot_logger.info("Selected minimum buy-in (by text)")
                             return True
-            
+
             # 方法3: 查找 BuyInModal 内的第一个按钮
             preset_btns = page.locator(".BuyInModal .Button")
             if await preset_btns.count() > 0:
                 first_btn = preset_btns.first
                 if await first_btn.is_visible():
+                    if await first_btn.is_disabled():
+                        bot_logger.info("First buy-in 按钮已 disabled，跳过")
+                        return True
                     await first_btn.click()
                     await asyncio.sleep(0.3)
                     bot_logger.info("Selected first buy-in preset (fallback)")
                     return True
-            
+
             bot_logger.warning("Min buy-in button not found")
             return False
         except Exception as e:
             bot_logger.error(f"Failed to select minimum buy-in: {e}")
             return False
-    
+
     async def select_max_buyin(self, page: Page) -> bool:
         """Select maximum buy-in amount."""
         try:
             # 等待 buy-in 弹窗出现
             await asyncio.sleep(0.5)
-            
+
             # 方法1: 通过类名查找 Max 按钮
             max_btn = page.locator(".BuyInModal__preset--max")
             if await max_btn.count() > 0 and await max_btn.is_visible():
+                if await max_btn.is_disabled():
+                    bot_logger.info("Max buy-in 按钮已 disabled（当前就是 max），跳过")
+                    return True
                 await max_btn.click()
                 await asyncio.sleep(0.3)
                 bot_logger.info("Selected maximum buy-in (by class)")
                 return True
-            
+
             # 方法2: 通过包含 "Max" 的按钮文本查找（限制在 buy-in 弹窗内）
             buyin_modal = page.locator(".BuyInModal").first
             if await buyin_modal.count() > 0:
@@ -382,17 +395,23 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     for i in range(await max_text_btn.count()):
                         btn = max_text_btn.nth(i)
                         if await btn.is_visible():
+                            if await btn.is_disabled():
+                                bot_logger.info("Max buy-in 按钮已 disabled（当前就是 max），跳过")
+                                return True
                             await btn.click()
                             await asyncio.sleep(0.3)
                             bot_logger.info("Selected maximum buy-in (by text)")
                             return True
-            
+
             # 方法3: 查找 BuyInModal 内的最后一个按钮
             preset_btns = page.locator(".BuyInModal .Button")
             count = await preset_btns.count()
             if count > 0:
                 last_btn = preset_btns.nth(count - 1)
                 if await last_btn.is_visible():
+                    if await last_btn.is_disabled():
+                        bot_logger.info("Last buy-in 按钮已 disabled，跳过")
+                        return True
                     await last_btn.click()
                     await asyncio.sleep(0.3)
                     bot_logger.info("Selected last buy-in preset (fallback)")

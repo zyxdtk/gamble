@@ -483,94 +483,180 @@ def print_sng_report(report):
 
 
 async def _browser_cli_decide(state, actions: dict) -> dict:
-    """浏览器模式人类玩家决策：显示状态，等待终端输入"""
-    import functools
+    """浏览器模式人类玩家决策：显示状态，等待终端输入
 
-    available = actions.get("available_actions", [])
-    if not available:
-        # 回退：从 actions 里猜测可用动作
-        available = []
-        if actions.get("can_check"):
-            available.append("check")
-        if actions.get("can_call"):
-            available.append("call")
-        if actions.get("can_fold"):
-            available.append("fold")
-        if actions.get("can_raise"):
-            available.append("raise")
-        if actions.get("can_bet"):
-            available.append("bet")
+    委托给统一 CLI 模块（src.utils.cli_player），与其他模式 UI 一致。
+    默认值由 GTO 策略生成，按 Enter 即采纳。
+    """
+    from src.utils.cli_player import (
+        ActionChoice,
+        build_default,
+        prompt_hand_action,
+    )
 
-    # 默认动作：check > call > fold
-    default_action = None
-    default_label = ""
-    if "check" in available:
-        default_action = "check"
-        default_label = "check"
-    elif "call" in available:
-        default_action = "call"
-        call_amount = actions.get("call_amount", 0)
-        default_label = f"call ({call_amount})"
+    # 将 PokerGameState + actions dict 转为统一 payload schema
+    payload = _browser_state_to_payload(state, actions)
+    to_call = int(actions.get("to_call", 0) or 0)
+
+    # GTO 策略默认（gto 是 balanced 的别名）
+    default = build_default(payload, strategy_name="gto")
+
+    # 决策上下文，用于日志
+    ctx = (
+        f"hand={' '.join(getattr(state, 'hole_cards', []) or [])} "
+        f"pot={getattr(state, 'pot', 0)} to_call={to_call}"
+    )
+
+    choice: ActionChoice = await prompt_hand_action(
+        payload,
+        default=default,
+        prompt_prefix="browser",
+        context=ctx,
+    )
+
+    # 浏览器模式独有的 pot_rake/rake 附加显示
+    pot_rake = getattr(state, "pot_rake", 0) if state else 0
+    rake = getattr(state, "rake", 0) if state else 0
+    if pot_rake or rake:
+        extras = []
+        if pot_rake:
+            extras.append(f"税后 [bold]{pot_rake}[/bold]")
+        if rake:
+            extras.append(f"抽税 [dim]{rake}[/dim]")
+        console.print("  ".join(extras))
+
+    # 转换回浏览器模式 {action, amount} 格式
+    action = choice.action
+    if action == "allin":
+        action = "raise"
+        amount = int(actions.get("max_raise", 999999) or 999999)
     else:
-        default_action = "fold"
-        default_label = "fold"
+        amount = choice.amount
+    bot_logger.info(
+        f"浏览器 CLI 决策: {action} {amount} (来源={choice.source}) | {ctx}"
+    )
+    return {"action": action, "amount": amount}
 
-    # 显示状态
-    pot = getattr(state, 'pot', 0) if state else 0
-    to_call = actions.get("call_amount", 0)
+
+def _browser_state_to_payload(state, actions: dict) -> dict:
+    """将浏览器 (PokerGameState, actions) 转为统一 schema 的 payload"""
+    pot = getattr(state, "pot", 0) if state else 0
+    to_call = int(actions.get("to_call", 0) or 0)
+    min_raise = int(actions.get("min_raise", 0) or (getattr(state, "min_raise", 0) if state else 0) or 0)
+    max_raise = int(actions.get("max_raise", 0) or 0)
+    hole = list(getattr(state, "hole_cards", []) or []) if state else []
+    board = list(getattr(state, "community_cards", []) or []) if state else []
+    my_seat = getattr(state, "my_seat_id", None) if state else None
+    players = getattr(state, "players", {}) if state else {}
+
+    # 当前阶段：浏览器用 prefs 标识，简化为 preflop/flop/turn/river
+    board_n = len(board)
+    if board_n == 0:
+        stage = "preflop"
+    elif board_n == 3:
+        stage = "flop"
+    elif board_n == 4:
+        stage = "turn"
+    else:
+        stage = "river"
+
+    available = list(actions.get("available", []) or [])
+    # 浏览器侧 "bet" 跟 "raise" 在显示层等价，统一为 raise
+    norm_available = []
+    for a in available:
+        if a == "bet":
+            norm_available.append("RAISE")
+        else:
+            norm_available.append(a.upper())
+
+    players_data = {}
+    for sid, p in players.items():
+        players_data[str(sid)] = {
+            "user_id": str(sid),
+            "name": getattr(p, "name", "") or f"Seat{sid}",
+            "chips": getattr(p, "chips", 0),
+            "is_active": getattr(p, "status", "active") not in ("folded", "sit_out"),
+            "status": getattr(p, "status", "active"),
+            "bet": getattr(p, "bet", 0),
+            "is_acting": getattr(p, "is_acting", False),
+        }
+
+    return {
+        "my_seat_id": my_seat,
+        "hole_cards": hole,
+        "community_cards": board,
+        "pot": pot,
+        "to_call": to_call,
+        "min_raise": min_raise,
+        "max_raise": max_raise,
+        "available_actions": norm_available,
+        "current_stage": stage,
+        "players": players_data,
+    }
+
+
+def _render_browser_state(state, actions: dict, available: list):
+    """渲染与 CLI 模式对齐的桌桌状态：底池、公共牌、座位、玩家列表"""
+    pot = getattr(state, "pot", 0) if state else 0
+    pot_rake = getattr(state, "pot_rake", 0) if state else 0
+    rake = getattr(state, "rake", 0) if state else 0
+    community_cards = getattr(state, "community_cards", []) if state else []
+    my_seat_id = getattr(state, "my_seat_id", None) if state else None
+    hole_cards = getattr(state, "hole_cards", []) if state else []
+    min_raise = getattr(state, "min_raise", 0) if state else 0
+    to_call = actions.get("to_call", 0)
+    players = getattr(state, "players", {}) if state else {}
+
+    # 底池行（含抽税）
+    pot_parts = [f"底池 [bold yellow]{pot}[/bold yellow]"]
+    if pot_rake > 0:
+        pot_parts.append(f"税后 [bold]{pot_rake}[/bold]")
+    if rake > 0:
+        pot_parts.append(f"抽税 [dim]{rake}[/dim]")
+
+    # 公共牌
+    board_line = ""
+    if community_cards:
+        board_line = f"\n公共牌: [bold cyan]{' '.join(community_cards)}[/bold cyan]"
+
+    # 手牌
+    hole_line = ""
+    if hole_cards:
+        hole_line = f"\n手牌:   [bold magenta]{' '.join(hole_cards)}[/bold magenta]"
+
+    # 关键信息行
+    key_line = (
+        f"  |  需跟注 [bold]{to_call}[/bold]"
+        f"  |  最小加注 [bold]{min_raise}[/bold]"
+        f"  |  我的座位 [bold]{my_seat_id}[/bold]"
+    )
+
     console.print(Panel(
-        f"底池: [bold yellow]{pot}[/bold yellow]  |  需跟注: [bold]{to_call}[/bold]",
+        "  ".join(pot_parts) + key_line + hole_line + board_line,
         title="[bold]你的回合 (浏览器)[/bold]",
         border_style="green",
     ))
-    actions_display = " | ".join(f"[bold cyan]{a}[/bold cyan]" for a in available)
-    console.print(f"可用动作: {actions_display}")
-    console.print(f"[dim]回车 = {default_label}[/dim]")
 
-    while True:
-        try:
-            loop = asyncio.get_running_loop()
-            cmd_line = await loop.run_in_executor(
-                None, functools.partial(input, f"browser> [{default_label}]: ")
+    # 玩家列表
+    if players:
+        console.print("[bold]玩家:[/bold]")
+        status_marker = {
+            "active": "[green]●[/green]",
+            "folded": "[dim]✕ 弃牌[/dim]",
+            "all_in": "[red]▲ 全押[/red]",
+            "sit_out": "[yellow]○ 暂离[/yellow]",
+        }
+        for seat_id in sorted(players.keys()):
+            p = players[seat_id]
+            marker = status_marker.get(p.status, f"[{p.status}]")
+            acting = " [bold cyan]<- 行动中[/bold cyan]" if getattr(p, "is_acting", False) else ""
+            me = " [bold magenta](我)[/bold magenta]" if seat_id == my_seat_id else ""
+            name = getattr(p, "name", "") or f"Seat{seat_id}"
+            chips = getattr(p, "chips", 0)
+            console.print(
+                f"  [dim]{seat_id:>2}[/dim]  {marker}  [bold]{name}[/bold]{me}  "
+                f"筹码 [yellow]{chips}[/yellow]{acting}"
             )
-            cmd_line = cmd_line.strip().lower()
-
-            if not cmd_line:
-                if default_action:
-                    result = {"action": default_action, "amount": 0}
-                    if default_action == "call":
-                        result["amount"] = actions.get("call_amount", 0)
-                    return result
-                return {"action": "fold", "amount": 0}
-
-            parts = cmd_line.split()
-            cmd = parts[0]
-
-            if cmd == "fold" and "fold" in available:
-                return {"action": "fold", "amount": 0}
-            if cmd == "check" and "check" in available:
-                return {"action": "check", "amount": 0}
-            if cmd == "call" and "call" in available:
-                return {"action": "call", "amount": actions.get("call_amount", 0)}
-            if cmd in ("raise", "bet") and ("raise" in available or "bet" in available):
-                action_name = "raise" if "raise" in available else "bet"
-                if len(parts) > 1:
-                    try:
-                        amount = int(parts[1])
-                        return {"action": action_name, "amount": amount}
-                    except ValueError:
-                        console.print("[red]金额必须是整数[/red]")
-                        continue
-                else:
-                    console.print(f"[red]用法: {action_name} <金额>[/red]")
-                    continue
-            if cmd in ("allin", "all_in"):
-                return {"action": "raise", "amount": 999999}
-
-            console.print(f"[red]无效命令: {cmd}。可用: {', '.join(available)}[/red]")
-
-        except (KeyboardInterrupt, EOFError):
-            return {"action": "fold", "amount": 0}
 
 
 async def run_replaypoker(args):
@@ -581,6 +667,20 @@ async def run_replaypoker(args):
     config: BrowserPlatformConfig = config_data["config"]
     cli_mode = config_data["cli_mode"]
     has_human = getattr(args, 'human', False)
+
+    # 解析 --buyin 参数（min/max/default/整数），人类和自动模式共用，默认 min
+    raw_buyin = getattr(args, "buyin", "min")
+    if isinstance(raw_buyin, str):
+        buyin_amount: Optional[object] = raw_buyin.lower()
+        if buyin_amount not in ("min", "max", "default"):
+            try:
+                buyin_amount = int(raw_buyin)
+            except ValueError:
+                console.print(f"[yellow]无效的 --buyin '{raw_buyin}'，回退到 min[/yellow]")
+                buyin_amount = "min"
+    else:
+        buyin_amount = raw_buyin
+    bot_logger.info(f"买入策略: {buyin_amount}")
 
     if cli_mode:
         # 完全手动浏览器控制
@@ -611,7 +711,7 @@ async def run_replaypoker(args):
                     return
 
                 await asyncio.sleep(2)
-                await platform._check_and_sit_in(table_id)
+                await platform._check_and_sit_in(table_id, buyin_amount)
 
                 from src.core.interfaces import GameAction, ActionType
 
@@ -619,7 +719,7 @@ async def run_replaypoker(args):
                     # 弹窗处理 + WS 健康 + 入座检查
                     await platform._dismiss_overlays(table_id)
                     await platform._ensure_ws_alive(table_id)
-                    await platform._check_and_sit_in(table_id)
+                    await platform._check_and_sit_in(table_id, buyin_amount)
 
                     state = await platform.get_game_state(table_id)
                     actions = await platform.get_available_actions(table_id)
@@ -650,17 +750,6 @@ async def run_replaypoker(args):
         else:
             # 全自动模式：BrowserAutoPlayer
             from src.platforms.browser.auto_player import BrowserAutoPlayer
-
-            buyin_amount = None
-            player_cfg = {}
-            try:
-                import yaml
-                with open("config/settings.yaml", "r") as f:
-                    data = yaml.safe_load(f) or {}
-                player_cfg = data.get("player", {})
-            except Exception:
-                pass
-            buyin_amount = player_cfg.get("buyin_amount")
 
             auto_player = BrowserAutoPlayer(
                 platform=platform,
@@ -703,6 +792,8 @@ def parse_args():
     parser.add_argument("--human", action="store_true", help="启用人类玩家（CLI 交互）")
     parser.add_argument("--cli", action="store_true", help="ReplayPoker 完全手动浏览器控制")
     parser.add_argument("--hands", type=int, default=0, help="ReplayPoker 限定手数（0=无限）")
+    parser.add_argument("--buyin", default="min",
+                        help="ReplayPoker 买入量：min/max/default 或具体整数（默认 min）")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="WARNING", help="控制台日志级别 (默认: WARNING)")
     return parser.parse_args()
 

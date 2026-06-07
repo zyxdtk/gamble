@@ -45,6 +45,10 @@ class WebSocketListener:
         # VPIP/PFR 追踪器
         self.state["vpip_tracker"] = {}  # {user_id: {"hands": N, "vpip_count": N, "pfr_count": N}}
         self._current_stage = ""  # 当前阶段，用于判断 preflop
+
+        # 当前街道每名下注额（seat_id -> total bet on this street）
+        # 重置时机：startHand（新手牌）/ dealCommunityCards（新街道）
+        self._street_bets: Dict[int, int] = {}
     
     async def start_listening(self):
         """启动 WebSocket 监听"""
@@ -182,6 +186,9 @@ class WebSocketListener:
                         existing.append(card)
                 self.state["community_cards"] = existing
                 bot_logger.info(f"WS: Community Cards updated: {existing}")
+                # 新街道：重置本街下注（flop/turn/river 各自从 0 开始算）
+                if len(existing) in (3, 4, 5):
+                    self._reset_street_bets()
         
         elif action in ["updatePots", "awardPot"]:
             pots = update.get("pots", [])
@@ -199,6 +206,8 @@ class WebSocketListener:
             self.state["to_call"] = 0
             self.state["min_raise"] = 0
             self._current_stage = "preflop"
+            # 重置本街下注追踪（新一轮从 0 开始）
+            self._reset_street_bets()
             if "dealerSeat" in update:
                 self.state["dealer_seat"] = update.get("dealerSeat")
             bot_logger.info(f"WS: New hand started (ID: {self.state['hand_id']})")
@@ -224,6 +233,19 @@ class WebSocketListener:
                 # preflop 阶段的 raise 算 PFR
                 if self._current_stage == "preflop" and action == "raise":
                     self.state["vpip_tracker"][user_id]["pfr_count"] += 1
+
+            # 追踪本街每名下注额（仅 bet/call/raise，fold 不变）
+            if action in ("bet", "call", "raise") and user_id is not None:
+                # ReplayPoker 不同 action 用不同字段携带金额；按优先级尝试
+                amount = (
+                    update.get("amount")
+                    or update.get("raiseTo")
+                    or update.get("betAmount")
+                    or update.get("callAmount")
+                    or update.get("chips")
+                )
+                if isinstance(amount, (int, float)) and amount > 0:
+                    self._record_street_bet(user_id, int(amount))
         
         elif action in ["tick", "setActivePlayer"]:
             # 当前行动者
@@ -310,15 +332,21 @@ class WebSocketListener:
             if seat not in self.state["players"]:
                 self.state["players"][seat] = {
                     "seat_id": seat,
+                    "user_id": p_data.get("userId", ""),
                     "name": "",
                     "chips": 0,
                     "cards": [],
                     "is_acting": False,
                     "status": "active",
                 }
-            
+            else:
+                # 更新 user_id（以防被踢出后重新入座）
+                uid = p_data.get("userId")
+                if uid is not None:
+                    self.state["players"][seat]["user_id"] = uid
+
             p = self.state["players"][seat]
-            
+
             if "name" in p_data:
                 p["name"] = p_data["name"]
             
@@ -365,6 +393,7 @@ class WebSocketListener:
         self.state["to_call"] = 0
         self.state["min_raise"] = 0
         self.state["is_my_turn"] = False
+        self._reset_street_bets()
         bot_logger.debug("WS: State reset for new hand")
 
     def _vpip_ensure(self, user_id):
@@ -375,6 +404,40 @@ class WebSocketListener:
                 "vpip_count": 0,
                 "pfr_count": 0,
             }
+
+    def _record_street_bet(self, user_id, amount: int):
+        """记录/更新某玩家本街下注额。
+
+        ReplayPoker 协议下 raise 事件通常带 raise-to 总额（不是增量），
+        所以采用 SET 语义（取较大值）以兼容两种约定。
+        """
+        seat = self._seat_for_user(user_id)
+        if seat is None:
+            return
+        # SET 语义：raise-to 时整街总额；call 时等于 to_call；all-in 同样 SET
+        # 使用 max 是为了在 raise-by 协议下也能正确累加
+        prev = self._street_bets.get(seat, 0)
+        if amount >= prev:
+            self._street_bets[seat] = amount
+        # 同步到 player dict（方便 get_state() 直接读取）
+        if seat in self.state["players"]:
+            self.state["players"][seat]["street_bet"] = self._street_bets[seat]
+
+    def _seat_for_user(self, user_id) -> Optional[int]:
+        """通过 user_id 反查 seat_id"""
+        target = str(user_id) if user_id is not None else None
+        if target is None:
+            return None
+        for seat, pdata in self.state["players"].items():
+            if str(pdata.get("user_id", "")) == target:
+                return seat
+        return None
+
+    def _reset_street_bets(self):
+        """重置所有玩家的本街下注额（用于新手牌 / 新街道）"""
+        self._street_bets.clear()
+        for seat, pdata in self.state["players"].items():
+            pdata["street_bet"] = 0
 
     def get_player_stats(self, user_id) -> Dict[str, float]:
         """

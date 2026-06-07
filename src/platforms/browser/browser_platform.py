@@ -553,6 +553,7 @@ class BrowserPlatform(GamePlatform):
                 chips=p_data.get("chips", 0),
                 status=p_data.get("status", "active"),
                 is_acting=p_data.get("is_acting", False),
+                bet=p_data.get("street_bet", 0),
             )
             if p_data.get("cards"):
                 player.last_action = f"cards={p_data['cards']}"
@@ -786,8 +787,14 @@ class BrowserPlatform(GamePlatform):
         except Exception as e:
             bot_logger.error(f"WS 重连失败: {e}")
 
-    async def _auto_sit_in(self, table_id: Optional[str] = None, buyin_amount: Optional[int] = None):
-        """检测买入弹窗，选择筹码量，点击确认"""
+    async def _auto_sit_in(self, table_id: Optional[str] = None, buyin_amount=None):
+        """检测买入弹窗，选择筹码量，点击确认
+
+        buyin_amount 支持：
+        - None: 弹窗默认金额（直接点 OK）
+        - int: 输入具体金额
+        - 字符串 "min" / "max" / "default": 点击对应预设按钮
+        """
         page = self._get_table_page(table_id)
         if not page or page.is_closed():
             return False
@@ -801,8 +808,21 @@ class BrowserPlatform(GamePlatform):
 
             bot_logger.info("检测到买入弹窗，执行自动买入...")
 
-            # 设置买入金额（如果有指定）
-            if buyin_amount:
+            # 根据 buyin_amount 类型选择筹码量
+            if isinstance(buyin_amount, str):
+                preset = buyin_amount.lower()
+                if preset == "min":
+                    selected = await self.adapter.select_min_buyin(page)
+                elif preset == "max":
+                    selected = await self.adapter.select_max_buyin(page)
+                elif preset == "default":
+                    selected = await self.adapter.select_default_buyin(page)
+                else:
+                    bot_logger.warning(f"未知 buyin 预设: {buyin_amount}，使用弹窗默认")
+                    selected = True
+                if not selected:
+                    bot_logger.warning(f"buyin 预设 {preset} 选择失败，使用弹窗默认")
+            elif isinstance(buyin_amount, int):
                 await self.adapter.set_buyin_amount(page, buyin_amount)
 
             # 确认买入
@@ -818,7 +838,7 @@ class BrowserPlatform(GamePlatform):
             bot_logger.error(f"自动入座异常: {e}")
             return False
 
-    async def _check_and_sit_in(self, table_id: Optional[str] = None, buyin_amount: Optional[int] = None):
+    async def _check_and_sit_in(self, table_id: Optional[str] = None, buyin_amount=None):
         """检测是否需要入座/买入，如果是则执行"""
         page = self._get_table_page(table_id)
         if not page or page.is_closed():
@@ -855,10 +875,21 @@ class BrowserPlatform(GamePlatform):
             pass
 
         # 4. 检查 Sit in 按钮（从 sit out 状态回来）
+        #    仅在玩家确实是 sit_out 状态时才尝试，避免每轮都打印 "Sit in button not found"
         try:
-            sit_in_result = await self.adapter.sit_in(page)
-            if sit_in_result:
-                return True
+            is_sitting_out = False
+            if self._state_manager:
+                page_state = await self._state_manager.update_state()
+                my_seat = page_state.get("my_seat_id")
+                players = page_state.get("players", {})
+                if my_seat is not None:
+                    me = players.get(str(my_seat)) or players.get(my_seat)
+                    if me and me.get("status") == "sit_out":
+                        is_sitting_out = True
+            if is_sitting_out:
+                sit_in_result = await self.adapter.sit_in(page)
+                if sit_in_result:
+                    return True
         except Exception:
             pass
 

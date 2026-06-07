@@ -4,7 +4,7 @@
 """
 import os
 import yaml
-from typing import Optional
+from typing import Optional, Union
 
 from .browser_platform import BrowserPlatform, BrowserPlatformConfig
 from .exit_checker import ExitChecker
@@ -38,7 +38,7 @@ class BrowserAutoPlayer:
         self,
         platform: BrowserPlatform,
         strategy_type: str = "gto",
-        buyin_amount: Optional[int] = None,
+        buyin_amount: Optional[Union[int, str]] = None,
     ):
         self.platform = platform
         self.strategy_type = strategy_type
@@ -169,7 +169,7 @@ class BrowserAutoPlayer:
                 self._track_hands(state)
 
                 # 桌位级别策略检查（补筹/sit out/sit in）
-                table_action = self._decide_table_action(state)
+                table_action = await self._decide_table_action(state)
                 if table_action:
                     await human_delay("action")
                     continue
