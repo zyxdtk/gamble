@@ -693,7 +693,8 @@ class BrowserPlatform(GamePlatform):
             return False
         
         # 尝试入座
-        await asyncio.sleep(2)
+        from .human_delay import human_delay
+        await human_delay("action")
         await self.try_sit_down(table_id)
         
         return True
@@ -713,6 +714,136 @@ class BrowserPlatform(GamePlatform):
         """Stop the platform and clean up."""
         await self.shutdown()
     
+    async def _dismiss_overlays(self, table_id: Optional[str] = None):
+        """检测并关闭常见弹窗/覆盖层（断线重连、满员提示等）"""
+        page = self._get_table_page(table_id)
+        if not page or page.is_closed():
+            return
+
+        try:
+            # 处理 "I'm back" / "Sit in" / "Resume" 按钮
+            import re
+            for btn_text in ["I'm back", "Sit in", "Resume"]:
+                btn = page.get_by_role("button", name=re.compile(btn_text, re.I)).first
+                if await btn.count() > 0 and await btn.is_visible():
+                    bot_logger.info(f"关闭覆盖层: {btn_text}")
+                    await btn.click()
+                    await asyncio.sleep(1)
+
+            # 处理通用模态框关闭按钮
+            for selector in [".Modal__close", ".Button--dismiss"]:
+                close_btn = page.locator(selector).first
+                if await close_btn.count() > 0 and await close_btn.is_visible():
+                    bot_logger.info(f"关闭弹窗: {selector}")
+                    await close_btn.click()
+                    await asyncio.sleep(0.5)
+        except Exception as e:
+            bot_logger.debug(f"弹窗处理异常（可忽略）: {e}")
+
+    async def _ensure_ws_alive(self, table_id: Optional[str] = None):
+        """确保 WebSocket 连接健康，不健康时刷新页面重连"""
+        if not self._state_manager:
+            return
+
+        if self._state_manager.ws_listener.is_healthy():
+            return
+
+        bot_logger.warning("WS 连接不健康，尝试刷新页面重连...")
+        page = self._get_table_page(table_id)
+        if not page or page.is_closed():
+            return
+
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(3)
+
+            # 重新初始化状态管理器
+            if self._state_manager:
+                await self._state_manager.shutdown()
+                self._state_manager = StateManager(page)
+                await self._state_manager.initialize()
+                bot_logger.info("WS 重连成功")
+        except Exception as e:
+            bot_logger.error(f"WS 重连失败: {e}")
+
+    async def _auto_sit_in(self, table_id: Optional[str] = None, buyin_amount: Optional[int] = None):
+        """检测买入弹窗，选择筹码量，点击确认"""
+        page = self._get_table_page(table_id)
+        if not page or page.is_closed():
+            return False
+
+        try:
+            import re
+            # 检测买入弹窗
+            modal = page.locator(".BuyInModal, .BuyinModal, .ModalOverlay").first
+            if await modal.count() == 0 or not await modal.is_visible():
+                return False
+
+            bot_logger.info("检测到买入弹窗，执行自动买入...")
+
+            # 设置买入金额（如果有指定）
+            if buyin_amount:
+                await self.adapter.set_buyin_amount(page, buyin_amount)
+
+            # 确认买入
+            confirmed = await self.adapter.confirm_buyin(page)
+            if confirmed:
+                bot_logger.info("买入确认成功")
+                await asyncio.sleep(2)
+                return True
+            else:
+                bot_logger.warning("买入确认失败")
+                return False
+        except Exception as e:
+            bot_logger.error(f"自动入座异常: {e}")
+            return False
+
+    async def _check_and_sit_in(self, table_id: Optional[str] = None, buyin_amount: Optional[int] = None):
+        """检测是否需要入座/买入，如果是则执行"""
+        page = self._get_table_page(table_id)
+        if not page or page.is_closed():
+            return False
+
+        # 1. 检查买入弹窗
+        if await self._auto_sit_in(table_id, buyin_amount):
+            return True
+
+        # 2. 检查 "Seat Me Anywhere" 按钮
+        try:
+            import re
+            seat_any = page.get_by_role("button", name=re.compile("Seat me anywhere", re.I)).first
+            if await seat_any.count() > 0 and await seat_any.is_visible():
+                bot_logger.info("点击 'Seat Me Anywhere'")
+                await seat_any.click()
+                await asyncio.sleep(1)
+                # 点击后再检查买入弹窗
+                if await self._auto_sit_in(table_id, buyin_amount):
+                    return True
+        except Exception:
+            pass
+
+        # 3. 检查空座位
+        try:
+            empty_seat = page.locator(".Seat--empty, .Seat--open").first
+            if await empty_seat.count() > 0 and await empty_seat.is_visible():
+                bot_logger.info("点击空座位")
+                await empty_seat.click()
+                await asyncio.sleep(1)
+                if await self._auto_sit_in(table_id, buyin_amount):
+                    return True
+        except Exception:
+            pass
+
+        # 4. 检查 Sit in 按钮（从 sit out 状态回来）
+        try:
+            sit_in_result = await self.adapter.sit_in(page)
+            if sit_in_result:
+                return True
+        except Exception:
+            pass
+
+        return False
+
     async def shutdown(self) -> None:
         """Clean up and shut down the platform."""
         self._running = False

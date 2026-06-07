@@ -123,3 +123,11 @@ table_logger = get_logger("table")
 arena_logger = get_logger("arena")
 ws_logger = get_logger("ws")
 hud_logger = get_logger("hud")
+
+# === 浏览器平台专用调试 Logger ===
+# WS 通道：原始帧 + 解析后字段
+ws_raw_logger = get_logger("ws_raw")
+# DOM 通道：页面解析结果（按钮、筹码、座位等）
+dom_logger = get_logger("dom")
+# 合并状态：StateManager 输出给上层的最终状态
+state_logger = get_logger("merged_state")

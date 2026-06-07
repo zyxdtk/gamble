@@ -7,7 +7,8 @@ import re
 from typing import Dict, List, Optional, Any
 from playwright.async_api import Page
 from .base import WebsiteAdapter, TableInfo, TableFilter
-from src.utils.logger import bot_logger
+from src.utils.logger import bot_logger, dom_logger
+from ..human_delay import human_delay
 
 
 class ReplayPokerAdapter(WebsiteAdapter):
@@ -508,6 +509,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     m = re.search(r'([\d,]+)', rake_text)
                     if m:
                         state["rake"] = int(m.group(1).replace(",", ""))
+            dom_logger.debug(f"[DOM] pot={state['pot']}, pot_rake={state.get('pot_rake', 0)}, rake={state.get('rake', 0)}")
             
             # 2. 提取公共牌
             community_cards = []
@@ -541,7 +543,8 @@ class ReplayPokerAdapter(WebsiteAdapter):
                             community_cards = cards_in_msg + community_cards
             
             state["community_cards"] = community_cards
-            
+            dom_logger.debug(f"[DOM] community_cards={community_cards}")
+
             # 3. 提取我的座位ID
             # [FIX] ReplayPoker 使用 .Seat--currentUser 而不是 .Seat--me
             my_seat_elem = page.locator(".Seat--currentUser").first
@@ -551,6 +554,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
                 position_match = re.search(r'Position--(\d+)', seat_class)
                 if position_match:
                     state["my_seat_id"] = int(position_match.group(1))
+            dom_logger.debug(f"[DOM] my_seat_id={state['my_seat_id']}")
             
             # 检测是否轮到用户行动（需要多个条件满足）
             is_my_turn = False
@@ -639,8 +643,11 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     m = re.search(r'\b(?:Raise|Bet)\s+(?:to\s+)?([\d,]+)', btn_text, re.IGNORECASE)
                     if m:
                         state["min_raise"] = int(m.group(1).replace(",", ""))
+            dom_logger.debug(
+                f"[DOM] to_call={state['to_call']}, min_raise={state['min_raise']}"
+            )
         except Exception:
-            pass
+            bot_logger.exception("[DOM] get_game_state error")
         return state
     
     async def get_available_actions(self, page: Page) -> Dict[str, Any]:
@@ -767,8 +774,14 @@ class ReplayPokerAdapter(WebsiteAdapter):
                         actions["presets"][preset_name] = True
                 except Exception:
                     pass
-        except Exception as e:
-            bot_logger.error(f"Failed to get available actions: {e}")
+
+            dom_logger.debug(
+                f"[DOM] available_actions={actions['available']}, "
+                f"to_call={actions['to_call']}, min_raise={actions['min_raise']}, "
+                f"presets={list(actions['presets'].keys())}"
+            )
+        except Exception:
+            bot_logger.exception("Failed to get available actions")
         return actions
     
     async def execute_action(self, page: Page, action: str, amount: Optional[int] = None, preset: Optional[str] = None) -> bool:
@@ -779,7 +792,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
             if action_lower == "fold":
                 btn = page.get_by_role("button", name=re.compile("Fold", re.IGNORECASE)).first
                 if await btn.count() > 0 and await btn.is_visible(timeout=3000):
-                    await asyncio.sleep(0.5)
+                    await human_delay("fold")
                     await btn.click()
                     return True
 
@@ -789,7 +802,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     btn = page.get_by_role("button", name=re.compile("Call", re.IGNORECASE)).first
 
                 if await btn.count() > 0 and await btn.is_visible(timeout=3000):
-                    await asyncio.sleep(0.5)
+                    await human_delay("check" if action_lower == "check" else "call")
                     await btn.click()
                     return True
 
@@ -830,14 +843,14 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     btn = page.get_by_role("button", name=re.compile("Bet", re.IGNORECASE)).first
 
                 if await btn.count() > 0 and await btn.is_visible(timeout=3000):
-                    await asyncio.sleep(0.5)
+                    await human_delay("raise")
                     await btn.click()
                     return True
 
             elif action_lower in ["all_in", "allin"]:
                 btn = page.get_by_role("button", name=re.compile("All In", re.IGNORECASE)).first
                 if await btn.count() > 0 and await btn.is_visible(timeout=3000):
-                    await asyncio.sleep(0.5)
+                    await human_delay("all_in")
                     await btn.click()
                     return True
 

@@ -8,7 +8,7 @@ import json
 import re
 from typing import Dict, Any, Optional, Set
 from playwright.async_api import Page
-from src.utils.logger import bot_logger
+from src.utils.logger import bot_logger, ws_raw_logger
 
 
 class WebSocketListener:
@@ -41,6 +41,10 @@ class WebSocketListener:
         self._last_ws_time = 0
         self._is_listening = False
         self._registered_ws_ids: Set[int] = set()
+
+        # VPIP/PFR 追踪器
+        self.state["vpip_tracker"] = {}  # {user_id: {"hands": N, "vpip_count": N, "pfr_count": N}}
+        self._current_stage = ""  # 当前阶段，用于判断 preflop
     
     async def start_listening(self):
         """启动 WebSocket 监听"""
@@ -71,38 +75,43 @@ class WebSocketListener:
             self._last_ws_time = time.time()
 
             payload = frame.text if hasattr(frame, 'text') else str(frame)
+            # 记录原始帧（截断防止日志爆炸）
+            payload_preview = payload if len(payload) <= 2000 else payload[:2000] + f"...[truncated, total {len(payload)} chars]"
+            ws_raw_logger.debug(f"[RAW FRAME] ({len(payload)} chars) {payload_preview}")
+
             if not payload.startswith("["):
                 return
 
-            # 记录原始 WS 消息到文件日志（方便调试）
-            bot_logger.debug(f"WS raw: {payload[:500]}")
-
             data = json.loads(payload)
+            ws_raw_logger.debug(f"[PARSED ENVELOPE] type={data[3] if len(data) > 3 else '?'}")
+
             if len(data) < 5 or data[3] != "output":
                 return
 
             await self._process_game_message(data[4])
         except Exception as e:
             bot_logger.debug(f"WS frame processing error: {e}")
+            ws_raw_logger.error(f"[PARSE ERROR] {e}")
     
     async def _process_game_message(self, data: Dict):
         """处理游戏状态消息"""
         if not isinstance(data, dict):
             return
-        
+
         # 去重：使用全量内容哈希
         data_str = json.dumps(data, sort_keys=True)
         msg_hash = hash(data_str)
-        
+
         if msg_hash in self._processed_hashes:
             return
         self._processed_hashes.add(msg_hash)
-        
+
         if len(self._processed_hashes) > self._max_cache_size:
             self._processed_hashes = set(list(self._processed_hashes)[-self._max_cache_size//2:])
-        
+
         updates = data.get("updates", [])
-        
+        ws_raw_logger.debug(f"[GAME MSG] updates_count={len(updates)}")
+
         # 优先级排序：startHand 先于 dealHoleCards
         def get_priority(u):
             act = u.get("action", "")
@@ -111,10 +120,23 @@ class WebSocketListener:
             if act == "dealHoleCards":
                 return 1
             return 2
-        
+
         sorted_updates = sorted(updates, key=get_priority)
-        
+
         for update in sorted_updates:
+            action = update.get("action", "<no-action>")
+            # 记录每个 update 的精简摘要
+            update_summary = {
+                k: update.get(k) for k in ["action", "seat", "seatId", "userId"]
+                if k in update
+            }
+            if "cards" in update:
+                update_summary["cards"] = update["cards"]
+            if "pot" in update:
+                update_summary["pot"] = update["pot"]
+            if "communityCards" in update:
+                update_summary["communityCards"] = update["communityCards"]
+            ws_raw_logger.debug(f"[UPDATE] {json.dumps(update_summary, ensure_ascii=False)}")
             await self._apply_update(update)
     
     async def _apply_update(self, update: Dict):
@@ -176,12 +198,32 @@ class WebSocketListener:
             self.state["pot"] = 0
             self.state["to_call"] = 0
             self.state["min_raise"] = 0
+            self._current_stage = "preflop"
             if "dealerSeat" in update:
                 self.state["dealer_seat"] = update.get("dealerSeat")
             bot_logger.info(f"WS: New hand started (ID: {self.state['hand_id']})")
+
+            # VPIP/PFR: 新手牌开始时递增所有在座玩家的 hands
+            for p in update.get("players", []):
+                user_id = p.get("userId")
+                if user_id is not None and p.get("status") not in ["sitOut", "sit_out"]:
+                    self._vpip_ensure(user_id)
+                    self.state["vpip_tracker"][user_id]["hands"] += 1
         
         elif action == "blinds":
             self.state["big_blind"] = update.get("minimumRaise", self.state["big_blind"])
+
+        # VPIP/PFR 追踪：bet/call/raise/fold 动作
+        elif action in ("bet", "call", "raise", "fold"):
+            user_id = update.get("userId")
+            if user_id is not None:
+                self._vpip_ensure(user_id)
+                # preflop 阶段的 bet/call/raise 算 VPIP
+                if self._current_stage == "preflop" and action in ("bet", "call", "raise"):
+                    self.state["vpip_tracker"][user_id]["vpip_count"] += 1
+                # preflop 阶段的 raise 算 PFR
+                if self._current_stage == "preflop" and action == "raise":
+                    self.state["vpip_tracker"][user_id]["pfr_count"] += 1
         
         elif action in ["tick", "setActivePlayer"]:
             # 当前行动者
@@ -202,6 +244,7 @@ class WebSocketListener:
                 ws_state = update.get("state", "")
                 if ws_state:
                     self.state["current_stage"] = ws_state.lower()
+                    self._current_stage = ws_state.lower()
 
             # 提取跟注/加注金额（WS 结构化数据，比 DOM 更可靠）
             call_amount = update.get("callAmount")
@@ -323,3 +366,28 @@ class WebSocketListener:
         self.state["min_raise"] = 0
         self.state["is_my_turn"] = False
         bot_logger.debug("WS: State reset for new hand")
+
+    def _vpip_ensure(self, user_id):
+        """确保 VPIP 追踪器中有该玩家的记录"""
+        if user_id not in self.state["vpip_tracker"]:
+            self.state["vpip_tracker"][user_id] = {
+                "hands": 0,
+                "vpip_count": 0,
+                "pfr_count": 0,
+            }
+
+    def get_player_stats(self, user_id) -> Dict[str, float]:
+        """
+        获取玩家的 VPIP/PFR 统计
+
+        Returns:
+            {"vpip": 0.0, "pfr": 0.0} 百分比值
+        """
+        tracker = self.state.get("vpip_tracker", {})
+        entry = tracker.get(user_id)
+        if not entry or entry["hands"] == 0:
+            return {"vpip": 0.0, "pfr": 0.0}
+        return {
+            "vpip": entry["vpip_count"] / entry["hands"] * 100,
+            "pfr": entry["pfr_count"] / entry["hands"] * 100,
+        }

@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional
 from playwright.async_api import Page
 from .websocket_listener import WebSocketListener
 from .adapters.replay_poker import ReplayPokerAdapter
-from src.utils.logger import bot_logger
+from src.utils.logger import bot_logger, dom_logger, state_logger
 
 
 class StateManager:
@@ -200,7 +200,7 @@ class StateManager:
             # 提取抽税金额（.Stack--rake）
             rake_elem = self.page.locator(".Stack--rake .Stack__value").first
             if await rake_elem.count(timeout=2000) > 0:
-                rake_text = await rake_elem.text_content(timeout=500)
+                rake_text = await rake_elem.text_content(timeout=2000)
                 if rake_text:
                     import re
                     m = re.search(r'([\d,]+)', rake_text)
@@ -210,6 +210,11 @@ class StateManager:
         except Exception as e:
             bot_logger.debug(f"DOM extraction error: {e}")
 
+        dom_logger.debug(
+            f"[DOM-EXTRACT] actions={state['available_actions']}, "
+            f"to_call={state['to_call']}, min_raise={state['min_raise']}, "
+            f"pot_from_dom={state['pot_from_dom']}"
+        )
         return state
     
     def _merge_states(self, ws_state: Dict, dom_state: Dict) -> Dict[str, Any]:
@@ -270,9 +275,20 @@ class StateManager:
 
         if pot_ws > 0 and pot_dom > 0 and pot_dom > pot_ws:
             # DOM 底池更大，说明 WS 的 pot 不完整（可能只是当前轮下注）
+            diff = pot_dom - pot_ws
+            state_logger.warning(
+                f"[POT-MISMATCH] ws={pot_ws}, dom={pot_dom}, diff={diff} — using DOM"
+            )
             merged["pot"] = pot_dom
             self._log_once("pot_dom_override", f"Using pot from DOM ({pot_dom}), WS pot incomplete ({pot_ws})")
-        elif merged["pot"] == 0 and pot_dom > 0:
+        elif pot_ws > 0 and pot_dom > 0:
+            diff = abs(pot_ws - pot_dom)
+            if diff > max(pot_ws, pot_dom) * 0.1:  # 差异超过 10%
+                state_logger.warning(
+                    f"[POT-MISMATCH] ws={pot_ws}, dom={pot_dom}, diff={diff} — using WS"
+                )
+
+        if merged["pot"] == 0 and pot_dom > 0:
             merged["pot"] = pot_dom
             self._log_once("pot_dom", "Using pot from DOM (WS has no data)")
 
@@ -291,6 +307,9 @@ class StateManager:
                 # my_seat_id 已知且已入座但无 active_seat 信息 → DOM 按钮作为回退
                 merged["is_my_turn"] = True
                 self._log_once("is_my_turn_infer", "Inferred is_my_turn=True from available actions")
+                state_logger.debug(
+                    f"[INFER] is_my_turn=True (from available_actions={merged['available_actions']})"
+                )
 
         return merged
 

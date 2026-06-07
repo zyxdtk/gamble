@@ -102,13 +102,18 @@ def configure_browser(args) -> dict:
     if args.stakes:
         config.preferred_stakes = args.stakes
     if args.strategy:
-        strategy_map = {
+        # 区分桌子选择策略和扑克策略
+        table_strategy_map = {
             "fifo": TableSelectionStrategy.FIFO,
             "most": TableSelectionStrategy.MOST_PLAYERS,
             "least": TableSelectionStrategy.LEAST_PLAYERS,
             "random": TableSelectionStrategy.RANDOM,
         }
-        config.table_selection_strategy = strategy_map[args.strategy]
+        if args.strategy in table_strategy_map:
+            config.table_selection_strategy = table_strategy_map[args.strategy]
+        else:
+            # 扑克策略（如 gto, checkorfold, range 等）
+            config.strategy_type = args.strategy
     config.headless = args.headless
 
     return {"config": config, "cli_mode": getattr(args, 'cli', False)}
@@ -583,64 +588,86 @@ async def run_replaypoker(args):
         cli = BrowserTestCLI(config=config, headless=args.headless)
         await cli.run()
     else:
-        # 自动/人类模式
+        # 自动模式：使用 BrowserAutoPlayer 编排
         mode_label = "人类" if has_human else "自动"
         console.print(f"\n[bold]=== ReplayPoker {mode_label}模式 ===[/bold]")
         config.auto_mode = True
         platform = BrowserPlatform(config=config)
-        await platform.initialize()
 
-        try:
-            logged_in = await platform.ensure_logged_in()
-            if not logged_in:
-                console.print("[red]登录失败，退出[/red]")
-                await platform.shutdown()
-                return
+        if has_human:
+            # 人类模式：仍使用旧循环但加上新能力
+            await platform.initialize()
+            try:
+                logged_in = await platform.ensure_logged_in()
+                if not logged_in:
+                    console.print("[red]登录失败，退出[/red]")
+                    await platform.shutdown()
+                    return
 
-            table_id = await platform.open_table()
-            if not table_id:
-                console.print("[red]无可用桌子，退出[/red]")
-                await platform.shutdown()
-                return
+                table_id = await platform.open_table()
+                if not table_id:
+                    console.print("[red]无可用桌子，退出[/red]")
+                    await platform.shutdown()
+                    return
 
-            await asyncio.sleep(2)
-            await platform.try_sit_down(table_id)
+                await asyncio.sleep(2)
+                await platform._check_and_sit_in(table_id)
 
-            from src.strategies import get_strategy
-            from src.core.interfaces import GameAction, ActionType
+                from src.core.interfaces import GameAction, ActionType
 
-            strategy = get_strategy(config.strategy_type)
+                while True:
+                    # 弹窗处理 + WS 健康 + 入座检查
+                    await platform._dismiss_overlays(table_id)
+                    await platform._ensure_ws_alive(table_id)
+                    await platform._check_and_sit_in(table_id)
 
-            while True:
-                state = await platform.get_game_state(table_id)
-                actions = await platform.get_available_actions(table_id)
+                    state = await platform.get_game_state(table_id)
+                    actions = await platform.get_available_actions(table_id)
 
-                if actions.get("available"):
-                    if has_human:
+                    if actions.get("available"):
                         decision = await _browser_cli_decide(state, actions)
+                        if decision:
+                            action_type_str = decision.get("action")
+                            amount = decision.get("amount", 0)
+                            action_map = {
+                                "fold": ActionType.FOLD,
+                                "check": ActionType.CHECK,
+                                "call": ActionType.CALL,
+                                "raise": ActionType.RAISE,
+                                "bet": ActionType.BET,
+                            }
+                            action = GameAction(
+                                action_type=action_map.get(action_type_str, ActionType.FOLD),
+                                amount=amount,
+                            )
+                            await platform.execute_action(action, table_id)
+                            console.print(f"动作: {action_type_str} {amount}")
+                            await asyncio.sleep(3)
                     else:
-                        decision = strategy.decide(state, actions)
-                    if decision:
-                        action_type_str = decision.get("action")
-                        amount = decision.get("amount", 0)
-                        action_map = {
-                            "fold": ActionType.FOLD,
-                            "check": ActionType.CHECK,
-                            "call": ActionType.CALL,
-                            "raise": ActionType.RAISE,
-                            "bet": ActionType.BET,
-                        }
-                        action = GameAction(
-                            action_type=action_map.get(action_type_str, ActionType.FOLD),
-                            amount=amount,
-                        )
-                        await platform.execute_action(action, table_id)
-                        console.print(f"动作: {action_type_str} {amount}")
-                        await asyncio.sleep(3)
-                else:
-                    await asyncio.sleep(1)
-        finally:
-            await platform.shutdown()
+                        await asyncio.sleep(1)
+            finally:
+                await platform.shutdown()
+        else:
+            # 全自动模式：BrowserAutoPlayer
+            from src.platforms.browser.auto_player import BrowserAutoPlayer
+
+            buyin_amount = None
+            player_cfg = {}
+            try:
+                import yaml
+                with open("config/settings.yaml", "r") as f:
+                    data = yaml.safe_load(f) or {}
+                player_cfg = data.get("player", {})
+            except Exception:
+                pass
+            buyin_amount = player_cfg.get("buyin_amount")
+
+            auto_player = BrowserAutoPlayer(
+                platform=platform,
+                strategy_type=config.strategy_type,
+                buyin_amount=buyin_amount,
+            )
+            await auto_player.run()
 
 
 def parse_args():
@@ -649,13 +676,13 @@ def parse_args():
     parser.add_argument(
         "mode",
         nargs="?",
-        choices=["arena", "mtt", "sng", "ring", "replaypoker"],
+        choices=["arena", "mtt", "sng", "ring", "replaypoker", "auto", "cli"],
         default=None,
-        help="运行模式: arena/mtt/sng/ring/replaypoker"
+        help="运行模式: arena/mtt/sng/ring/replaypoker/auto/cli"
     )
     parser.add_argument("--headless", action="store_true", help="浏览器无头模式")
     parser.add_argument("--stakes", help="偏好盲注级别 (如 1/2, 5/10)")
-    parser.add_argument("--strategy", choices=["fifo", "most", "least", "random"], help="桌子选择策略")
+    parser.add_argument("--strategy", help="策略类型 (扑克策略: gto/range/exploitative/checkorfold/aggressive/neural, 或桌子选择: fifo/most/least/random)")
     parser.add_argument("--arena-hands", type=int, default=100, help="Arena 模式手数")
     parser.add_argument("--arena-players", type=int, default=3, help="Arena 模式玩家数")
     # MTT 参数
@@ -675,6 +702,7 @@ def parse_args():
     # 通用参数
     parser.add_argument("--human", action="store_true", help="启用人类玩家（CLI 交互）")
     parser.add_argument("--cli", action="store_true", help="ReplayPoker 完全手动浏览器控制")
+    parser.add_argument("--hands", type=int, default=0, help="ReplayPoker 限定手数（0=无限）")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="WARNING", help="控制台日志级别 (默认: WARNING)")
     return parser.parse_args()
 
@@ -735,6 +763,19 @@ async def main():
 
     # ReplayPoker 浏览器模式
     if args.mode == "replaypoker":
+        await run_replaypoker(args)
+        return
+
+    # auto 模式 = ReplayPoker 自动模式
+    if args.mode == "auto":
+        args.mode = "replaypoker"
+        await run_replaypoker(args)
+        return
+
+    # cli 模式 = ReplayPoker 手动浏览器控制
+    if args.mode == "cli":
+        args.mode = "replaypoker"
+        args.cli = True
         await run_replaypoker(args)
         return
 
