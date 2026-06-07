@@ -59,9 +59,6 @@ uv run python scripts/train_nlh_model.py
 - `ArenaAgent` — translates `GameEngine` state into `GameState` for strategies
 - `Competition` — multi-hand tournament runner with stats (VPIP, PFR, Profit)
 
-### Legacy (`src/bot/`)
-- `BrowserManager`, `TableManager`, `LobbyManager`, etc. — being replaced by `src/platforms/browser/`
-
 ## Key Data Flow
 
 ```

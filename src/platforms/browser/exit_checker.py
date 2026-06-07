@@ -1,6 +1,6 @@
 """
 退出条件检查器
-从 src/bot/lifecycle_manager.py 移植退出条件逻辑
+退出条件检查器
 """
 import os
 import yaml

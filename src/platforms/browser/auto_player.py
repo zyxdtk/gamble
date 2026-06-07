@@ -2,7 +2,6 @@
 自动游戏循环编排器
 结合 BrowserPlatform 的所有能力，实现全自动扑克游戏
 """
-import asyncio
 import os
 import yaml
 from typing import Optional
@@ -119,7 +118,7 @@ class BrowserAutoPlayer:
                 return
 
             # 5. 尝试入座
-            await asyncio.sleep(2)
+            await human_delay("action")
             await self.platform._check_and_sit_in(
                 self._current_table_id, self.buyin_amount
             )

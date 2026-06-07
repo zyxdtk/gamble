@@ -1,6 +1,6 @@
 """
 人类延迟模拟
-从 src/bot/utils.py 移植，正态分布 + 随机抖动
+正态分布 + 随机抖动的人类延迟模拟
 """
 import asyncio
 import random
