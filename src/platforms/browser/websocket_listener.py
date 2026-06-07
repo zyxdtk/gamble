@@ -8,7 +8,7 @@ import json
 import re
 from typing import Dict, Any, Optional, Set
 from playwright.async_api import Page
-from src.utils.logger import bot_logger
+from src.utils.logger import bot_logger, ws_raw_logger
 
 
 class WebSocketListener:
@@ -69,37 +69,45 @@ class WebSocketListener:
         try:
             import time
             self._last_ws_time = time.time()
-            
+
             payload = frame.text if hasattr(frame, 'text') else str(frame)
+            # 记录原始帧（截断防止日志爆炸）
+            payload_preview = payload if len(payload) <= 2000 else payload[:2000] + f"...[truncated, total {len(payload)} chars]"
+            ws_raw_logger.debug(f"[RAW FRAME] ({len(payload)} chars) {payload_preview}")
+
             if not payload.startswith("["):
                 return
-            
+
             data = json.loads(payload)
+            ws_raw_logger.debug(f"[PARSED ENVELOPE] type={data[3] if len(data) > 3 else '?'}")
+
             if len(data) < 5 or data[3] != "output":
                 return
-            
+
             await self._process_game_message(data[4])
         except Exception as e:
             bot_logger.debug(f"WS frame processing error: {e}")
+            ws_raw_logger.error(f"[PARSE ERROR] {e}")
     
     async def _process_game_message(self, data: Dict):
         """处理游戏状态消息"""
         if not isinstance(data, dict):
             return
-        
+
         # 去重：使用全量内容哈希
         data_str = json.dumps(data, sort_keys=True)
         msg_hash = hash(data_str)
-        
+
         if msg_hash in self._processed_hashes:
             return
         self._processed_hashes.add(msg_hash)
-        
+
         if len(self._processed_hashes) > self._max_cache_size:
             self._processed_hashes = set(list(self._processed_hashes)[-self._max_cache_size//2:])
-        
+
         updates = data.get("updates", [])
-        
+        ws_raw_logger.debug(f"[GAME MSG] updates_count={len(updates)}")
+
         # 优先级排序：startHand 先于 dealHoleCards
         def get_priority(u):
             act = u.get("action", "")
@@ -108,10 +116,23 @@ class WebSocketListener:
             if act == "dealHoleCards":
                 return 1
             return 2
-        
+
         sorted_updates = sorted(updates, key=get_priority)
-        
+
         for update in sorted_updates:
+            action = update.get("action", "<no-action>")
+            # 记录每个 update 的精简摘要
+            update_summary = {
+                k: update.get(k) for k in ["action", "seat", "seatId", "userId"]
+                if k in update
+            }
+            if "cards" in update:
+                update_summary["cards"] = update["cards"]
+            if "pot" in update:
+                update_summary["pot"] = update["pot"]
+            if "communityCards" in update:
+                update_summary["communityCards"] = update["communityCards"]
+            ws_raw_logger.debug(f"[UPDATE] {json.dumps(update_summary, ensure_ascii=False)}")
             await self._apply_update(update)
     
     async def _apply_update(self, update: Dict):

@@ -72,3 +72,11 @@ table_logger = setup_logger("table", "table.log")
 arena_logger = setup_logger("arena", "arena.log")
 ws_logger = setup_logger("ws", "websocket.log")
 hud_logger = setup_logger("hud", "hud.log", minimal=True)
+
+# === 浏览器平台专用调试 Logger ===
+# WS 通道：原始帧 + 解析后字段
+ws_raw_logger = setup_logger("ws_raw", "websocket.log", level=logging.DEBUG)
+# DOM 通道：页面解析结果（按钮、筹码、座位等）
+dom_logger = setup_logger("dom", "dom.log", level=logging.DEBUG)
+# 合并状态：StateManager 输出给上层的最终状态
+state_logger = setup_logger("merged_state", "merged_state.log", level=logging.DEBUG)

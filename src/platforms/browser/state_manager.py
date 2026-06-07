@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional
 from playwright.async_api import Page
 from .websocket_listener import WebSocketListener
 from .adapters.replay_poker import ReplayPokerAdapter
-from src.utils.logger import bot_logger
+from src.utils.logger import bot_logger, dom_logger, state_logger
 
 
 class StateManager:
@@ -94,14 +94,14 @@ class StateManager:
             "min_raise": 0,
             "pot_from_dom": 0,
         }
-        
+
         try:
             # 提取可用按钮
             buttons = await self.dom_adapter.get_available_actions(self.page)
             state["available_actions"] = buttons.get("available", [])
             state["to_call"] = buttons.get("to_call", 0)
             state["min_raise"] = buttons.get("min_raise", 0)
-            
+
             # 提取底池（作为校验）
             pot_elem = self.page.locator(".Stack__value span").first
             if await pot_elem.count() > 0:
@@ -111,10 +111,16 @@ class StateManager:
                     val = re.sub(r"[^\d]", "", pot_text)
                     if val:
                         state["pot_from_dom"] = int(val)
-        
-        except Exception as e:
-            bot_logger.debug(f"DOM extraction error: {e}")
-        
+
+        except Exception:
+            # 只用 bot_logger.exception()，永远安全
+            bot_logger.exception("DOM extraction error")
+
+        dom_logger.debug(
+            f"[DOM-EXTRACT] actions={state['available_actions']}, "
+            f"to_call={state['to_call']}, min_raise={state['min_raise']}, "
+            f"pot_from_dom={state['pot_from_dom']}"
+        )
         return state
     
     def _merge_states(self, ws_state: Dict, dom_state: Dict) -> Dict[str, Any]:
@@ -147,25 +153,31 @@ class StateManager:
         # 校验底池
         pot_ws = ws_state.get("pot", 0)
         pot_dom = dom_state.get("pot_from_dom", 0)
-        
+
         if pot_ws > 0 and pot_dom > 0:
             diff = abs(pot_ws - pot_dom)
             if diff > max(pot_ws, pot_dom) * 0.1:  # 差异超过 10%
                 bot_logger.warning(
                     f"⚠️ Pot mismatch: WS={pot_ws}, DOM={pot_dom}, diff={diff}"
                 )
+                state_logger.warning(
+                    f"[POT-MISMATCH] ws={pot_ws}, dom={pot_dom}, diff={diff}"
+                )
                 # 仍然使用 WS 的值，因为它更可靠
-        
+
         # 如果没有 WS 的底池数据，使用 DOM 的
         if merged["pot"] == 0 and pot_dom > 0:
             merged["pot"] = pot_dom
             bot_logger.debug("Using pot from DOM (WS has no data)")
-        
+
         # 如果 WS 没有判断出 is_my_turn，但有可用按钮，则认为轮到我
         if not merged["is_my_turn"] and merged["available_actions"]:
             merged["is_my_turn"] = True
             bot_logger.debug("Inferred is_my_turn=True from available actions")
-        
+            state_logger.debug(
+                f"[INFER] is_my_turn=True (from available_actions={merged['available_actions']})"
+            )
+
         return merged
     
     def get_state(self) -> Dict[str, Any]:

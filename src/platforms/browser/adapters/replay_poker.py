@@ -7,7 +7,7 @@ import re
 from typing import Dict, List, Optional, Any
 from playwright.async_api import Page
 from .base import WebsiteAdapter, TableInfo, TableFilter
-from src.utils.logger import bot_logger
+from src.utils.logger import bot_logger, dom_logger
 
 
 class ReplayPokerAdapter(WebsiteAdapter):
@@ -488,6 +488,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     val = re.sub(r"[^\d]", "", pot_text)
                     if val:
                         state["pot"] = int(val)
+            dom_logger.debug(f"[DOM] pot={state['pot']}")
             
             # 2. 提取公共牌
             community_cards = []
@@ -520,7 +521,8 @@ class ReplayPokerAdapter(WebsiteAdapter):
                         community_cards = cards_str.split()
             
             state["community_cards"] = community_cards
-            
+            dom_logger.debug(f"[DOM] community_cards={community_cards}")
+
             # 3. 提取我的座位ID
             # [FIX] ReplayPoker 使用 .Seat--currentUser 而不是 .Seat--me
             my_seat_elem = page.locator(".Seat--currentUser").first
@@ -530,6 +532,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
                 position_match = re.search(r'Position--(\d+)', seat_class)
                 if position_match:
                     state["my_seat_id"] = int(position_match.group(1))
+            dom_logger.debug(f"[DOM] my_seat_id={state['my_seat_id']}")
             
             # 检测是否轮到用户行动（需要多个条件满足）
             is_my_turn = False
@@ -615,8 +618,11 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     digits = re.sub(r"[^\d]", "", btn_text)
                     if digits:
                         state["min_raise"] = int(digits)
+            dom_logger.debug(
+                f"[DOM] to_call={state['to_call']}, min_raise={state['min_raise']}"
+            )
         except Exception:
-            pass
+            bot_logger.exception("[DOM] get_game_state error")
         return state
     
     async def get_available_actions(self, page: Page) -> Dict[str, Any]:
@@ -728,8 +734,15 @@ class ReplayPokerAdapter(WebsiteAdapter):
                 btn = page.locator(selector)
                 if await btn.count() > 0 and await btn.first.is_visible():
                     actions["presets"][preset_name] = True
-        except Exception as e:
-            bot_logger.error(f"Failed to get available actions: {e}")
+
+            dom_logger.debug(
+                f"[DOM] available_actions={actions['available']}, "
+                f"to_call={actions['to_call']}, min_raise={actions['min_raise']}, "
+                f"presets={list(actions['presets'].keys())}"
+            )
+        except Exception:
+            # 只用 bot_logger + exception()，捕获完整 traceback 且不会因 logger 自身失败而雪崩
+            bot_logger.exception("Failed to get available actions")
         return actions
     
     async def execute_action(self, page: Page, action: str, amount: Optional[int] = None, preset: Optional[str] = None) -> bool:
