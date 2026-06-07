@@ -416,18 +416,38 @@ class BrowserPlatform(GamePlatform):
     
     async def sit_in(self, table_id: Optional[str] = None) -> bool:
         """Sit in from sitting out state.
-        
+
         Args:
             table_id: Table to sit in (uses first active table if None)
-        
+
         Returns:
             True if successful
         """
         page = self._get_table_page(table_id)
         if not page:
             return False
-        
+
         return await self.adapter.sit_in(page)
+
+    async def add_chips(
+        self,
+        amount: Optional[int] = None,
+        table_id: Optional[str] = None
+    ) -> bool:
+        """Add chips while seated at the table.
+
+        Args:
+            amount: Amount to add (uses default if None)
+            table_id: Table to add chips at (uses first active table if None)
+
+        Returns:
+            True if successful
+        """
+        page = self._get_table_page(table_id)
+        if not page:
+            return False
+
+        return await self.adapter.add_chips(page, amount)
     
     async def leave_table(
         self,

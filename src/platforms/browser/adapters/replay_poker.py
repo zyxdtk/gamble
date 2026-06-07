@@ -893,6 +893,59 @@ class ReplayPokerAdapter(WebsiteAdapter):
             bot_logger.error(f"Failed to sit in: {e}")
             return False
     
+    async def add_chips(self, page: Page, amount: Optional[int] = None) -> bool:
+        """Add chips while seated at the table.
+
+        ReplayPoker 的 'Add Chips' 按钮在牌桌头部（.Header__button--addChips），
+        点击后弹出与初始买入相同的 BuyInModal。
+        """
+        try:
+            # 1. 点击 Add Chips 按钮
+            add_btn_selectors = [
+                ".Header__button--addChips",
+                "button.Button--primary.Header__button--addChips",
+            ]
+            clicked = False
+            for selector in add_btn_selectors:
+                btn = page.locator(selector).first
+                if await btn.count() > 0 and await btn.is_visible():
+                    await btn.click()
+                    await asyncio.sleep(1)
+                    bot_logger.info("点击 'Add Chips' 按钮")
+                    clicked = True
+                    break
+
+            # 备用: 通过文字查找
+            if not clicked:
+                add_btn_text = page.get_by_role("button", name=re.compile("Add Chips", re.IGNORECASE)).first
+                if await add_btn_text.count() > 0 and await add_btn_text.is_visible():
+                    await add_btn_text.click()
+                    await asyncio.sleep(1)
+                    bot_logger.info("点击 'Add Chips' 按钮 (by text)")
+                    clicked = True
+
+            if not clicked:
+                bot_logger.warning("未找到 'Add Chips' 按钮")
+                return False
+
+            # 2. 在弹出的 BuyInModal 中设置金额并确认
+            if amount:
+                await self.set_buyin_amount(page, amount)
+
+            confirmed = await self.confirm_buyin(page)
+            if confirmed:
+                bot_logger.info(f"补筹成功{f' {amount}' if amount else ''}")
+                return True
+            else:
+                bot_logger.warning("补筹确认失败")
+                # 尝试取消弹窗避免卡住
+                await self.cancel_buyin(page)
+                return False
+
+        except Exception as e:
+            bot_logger.error(f"补筹异常: {e}")
+            return False
+
     async def leave_table(self, page: Page) -> bool:
         """Leave ReplayPoker table."""
         try:

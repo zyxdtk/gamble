@@ -133,6 +133,16 @@ class WebsiteAdapter(ABC):
         pass
     
     @abstractmethod
+    async def add_chips(self, page: Page, amount: Optional[int] = None) -> bool:
+        """Add chips while seated at the table.
+
+        Args:
+            page: The browser page
+            amount: Amount to add (optional, uses default if not specified)
+        """
+        pass
+
+    @abstractmethod
     async def leave_table(self, page: Page) -> bool:
         """Leave the current table."""
         pass

@@ -12,6 +12,7 @@ from .human_delay import human_delay
 from ...core.interfaces import GameAction, ActionType
 from ...strategies.strategy_manager import StrategyManager
 from ...strategies.game_state import GameState as PokerGameState
+from ...strategies.table_strategy import DefaultTableStrategy, TableState, TableActionType
 from ...utils.logger import bot_logger
 
 
@@ -59,6 +60,10 @@ class BrowserAutoPlayer:
         # 策略管理器
         self._strategy_mgr = StrategyManager()
         self._strategy = None
+
+        # 桌位策略（管理 ADD_CHIPS / SIT_OUT 等桌位级别决策）
+        self._table_strategy = DefaultTableStrategy()
+        self._last_table_action = None  # 避免重复执行同一桌位动作
 
         # 状态
         self._running = False
@@ -163,6 +168,12 @@ class BrowserAutoPlayer:
                 # 追踪手数
                 self._track_hands(state)
 
+                # 桌位级别策略检查（补筹/sit out/sit in）
+                table_action = self._decide_table_action(state)
+                if table_action:
+                    await human_delay("action")
+                    continue
+
                 # 获取可用动作
                 actions = await self.platform.get_available_actions(self._current_table_id)
 
@@ -183,6 +194,103 @@ class BrowserAutoPlayer:
             except Exception as e:
                 bot_logger.error(f"游戏循环异常: {e}", exc_info=True)
                 await human_delay("poll")
+
+    def _build_table_state(self, state: PokerGameState) -> TableState:
+        """从 PokerGameState 构建桌位状态"""
+        ws_state = {}
+        if self.platform._state_manager:
+            ws_state = self.platform._state_manager.ws_listener.get_state()
+
+        big_blind = ws_state.get("big_blind", 0)
+        if big_blind <= 0:
+            stakes = self.platform.config.preferred_stakes or "1/2"
+            try:
+                big_blind = int(stakes.split("/")[1])
+            except (IndexError, ValueError):
+                big_blind = 2
+
+        my_player = state.players.get(state.my_seat_id) if state.my_seat_id is not None else None
+        my_chips = my_player.chips if my_player else 0
+        is_seated = state.my_seat_id is not None
+        is_playing = is_seated and my_player is not None and my_player.status != "sitting_out"
+
+        # 计算盈利
+        total_profit = 0
+        if self._initial_chips is not None and my_chips > 0:
+            total_profit = my_chips - self._initial_chips
+
+        # 统计桌上活跃人数
+        active_count = sum(1 for p in state.players.values() if p.status != "sitting_out")
+        seat_count = len(state.players)
+
+        return TableState(
+            my_chips=my_chips,
+            is_seated=is_seated,
+            is_playing=is_playing,
+            hands_played=self._hands_played,
+            total_profit=total_profit,
+            current_bb=big_blind,
+            seat_count=seat_count,
+            active_count=active_count,
+            stop_loss_bb=self.exit_checker.stop_loss_bb or 250,
+            take_profit_bb=self.exit_checker.take_profit_bb or 300,
+            low_chips_bb=self.exit_checker.low_chips_bb or 10,
+            max_chips_bb=self.exit_checker.max_chips_bb or 800,
+        )
+
+    async def _decide_table_action(self, state: PokerGameState) -> bool:
+        """桌位级别策略决策（补筹/sit out 等），返回 True 表示已执行动作"""
+        table_state = self._build_table_state(state)
+        action = self._table_strategy.decide(table_state)
+
+        if action.action_type == TableActionType.NONE:
+            self._last_table_action = None
+            return False
+
+        # 避免重复执行同一动作
+        action_key = f"{action.action_type.value}:{action.amount}"
+        if action_key == self._last_table_action:
+            return False
+        self._last_table_action = action_key
+
+        bot_logger.info(f"桌位决策: {action.reasoning}")
+
+        if action.action_type == TableActionType.ADD_CHIPS:
+            success = await self.platform.add_chips(
+                amount=action.amount, table_id=self._current_table_id
+            )
+            if success:
+                bot_logger.info(f"补筹成功: +{action.amount}")
+            else:
+                bot_logger.warning("补筹失败")
+            return success
+
+        elif action.action_type == TableActionType.SIT_OUT:
+            # ReplayPoker 的 sit out 通过勾选 "Sit Out Next Hand" 实现
+            page = self.platform._get_table_page(self._current_table_id)
+            if page:
+                try:
+                    sit_out_cb = page.locator(".Footer__settings--sittingOut .CheckBox").first
+                    if await sit_out_cb.count() > 0:
+                        is_checked = "CheckBox--checked" in (await sit_out_cb.get_attribute("class") or "")
+                        if not is_checked:
+                            await sit_out_cb.click()
+                            bot_logger.info("已勾选 'Sit Out Next Hand'")
+                            return True
+                except Exception as e:
+                    bot_logger.warning(f"Sit out 操作失败: {e}")
+            return False
+
+        elif action.action_type == TableActionType.SIT_IN:
+            success = await self.platform.sit_in(self._current_table_id)
+            return success
+
+        elif action.action_type == TableActionType.LEAVE:
+            bot_logger.info(f"桌位策略要求离场: {action.reasoning}")
+            self._running = False
+            return True
+
+        return False
 
     async def _make_decision(self, state: PokerGameState, actions: dict):
         """策略决策 + 执行动作"""
