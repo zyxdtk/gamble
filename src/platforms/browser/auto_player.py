@@ -216,7 +216,7 @@ class BrowserAutoPlayer:
 
         # 计算盈利
         total_profit = 0
-        if self._initial_chips is not None and my_chips > 0:
+        if self._initial_chips is not None:
             total_profit = my_chips - self._initial_chips
 
         # 统计桌上活跃人数
@@ -247,11 +247,10 @@ class BrowserAutoPlayer:
             self._last_table_action = None
             return False
 
-        # 避免重复执行同一动作
+        # 避免重复执行同一动作（仅成功后记录，失败允许重试）
         action_key = f"{action.action_type.value}:{action.amount}"
         if action_key == self._last_table_action:
             return False
-        self._last_table_action = action_key
 
         bot_logger.info(f"桌位决策: {action.reasoning}")
 
@@ -260,29 +259,22 @@ class BrowserAutoPlayer:
                 amount=action.amount, table_id=self._current_table_id
             )
             if success:
+                self._last_table_action = action_key
                 bot_logger.info(f"补筹成功: +{action.amount}")
             else:
-                bot_logger.warning("补筹失败")
+                bot_logger.warning("补筹失败，下轮将重试")
             return success
 
         elif action.action_type == TableActionType.SIT_OUT:
-            # ReplayPoker 的 sit out 通过勾选 "Sit Out Next Hand" 实现
-            page = self.platform._get_table_page(self._current_table_id)
-            if page:
-                try:
-                    sit_out_cb = page.locator(".Footer__settings--sittingOut .CheckBox").first
-                    if await sit_out_cb.count() > 0:
-                        is_checked = "CheckBox--checked" in (await sit_out_cb.get_attribute("class") or "")
-                        if not is_checked:
-                            await sit_out_cb.click()
-                            bot_logger.info("已勾选 'Sit Out Next Hand'")
-                            return True
-                except Exception as e:
-                    bot_logger.warning(f"Sit out 操作失败: {e}")
-            return False
+            success = await self.platform.sit_out(self._current_table_id)
+            if success:
+                self._last_table_action = action_key
+            return success
 
         elif action.action_type == TableActionType.SIT_IN:
             success = await self.platform.sit_in(self._current_table_id)
+            if success:
+                self._last_table_action = action_key
             return success
 
         elif action.action_type == TableActionType.LEAVE:

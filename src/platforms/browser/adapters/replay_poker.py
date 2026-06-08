@@ -893,6 +893,24 @@ class ReplayPokerAdapter(WebsiteAdapter):
             bot_logger.error(f"Failed to sit in: {e}")
             return False
     
+    async def sit_out(self, page: Page) -> bool:
+        """Sit out by checking 'Sit Out Next Hand' checkbox."""
+        try:
+            sit_out_cb = page.locator(".Footer__settings--sittingOut .CheckBox").first
+            if await sit_out_cb.count() > 0:
+                cls = await sit_out_cb.get_attribute("class") or ""
+                if "CheckBox--checked" not in cls:
+                    await sit_out_cb.click()
+                    await asyncio.sleep(0.5)
+                    bot_logger.info("已勾选 'Sit Out Next Hand'")
+                    return True
+                # 已经处于 sit out 状态
+                return True
+            return False
+        except Exception as e:
+            bot_logger.error(f"Sit out 操作失败: {e}")
+            return False
+
     async def add_chips(self, page: Page, amount: Optional[int] = None) -> bool:
         """Add chips while seated at the table.
 
@@ -908,7 +926,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
             clicked = False
             for selector in add_btn_selectors:
                 btn = page.locator(selector).first
-                if await btn.count() > 0 and await btn.is_visible():
+                if await btn.count() > 0 and await btn.is_visible(timeout=3000):
                     await btn.click()
                     await asyncio.sleep(1)
                     bot_logger.info("点击 'Add Chips' 按钮")
@@ -918,7 +936,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
             # 备用: 通过文字查找
             if not clicked:
                 add_btn_text = page.get_by_role("button", name=re.compile("Add Chips", re.IGNORECASE)).first
-                if await add_btn_text.count() > 0 and await add_btn_text.is_visible():
+                if await add_btn_text.count() > 0 and await add_btn_text.is_visible(timeout=3000):
                     await add_btn_text.click()
                     await asyncio.sleep(1)
                     bot_logger.info("点击 'Add Chips' 按钮 (by text)")

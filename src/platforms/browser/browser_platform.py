@@ -429,6 +429,21 @@ class BrowserPlatform(GamePlatform):
 
         return await self.adapter.sit_in(page)
 
+    async def sit_out(self, table_id: Optional[str] = None) -> bool:
+        """Sit out from the current hand.
+
+        Args:
+            table_id: Table to sit out at (uses first active table if None)
+
+        Returns:
+            True if successful
+        """
+        page = self._get_table_page(table_id)
+        if not page:
+            return False
+
+        return await self.adapter.sit_out(page)
+
     async def add_chips(
         self,
         amount: Optional[int] = None,

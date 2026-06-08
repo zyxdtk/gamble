@@ -133,6 +133,18 @@ class WebsiteAdapter(ABC):
         pass
     
     @abstractmethod
+    async def sit_out(self, page: Page) -> bool:
+        """Sit out from the current hand (check 'Sit Out Next Hand').
+
+        Args:
+            page: The browser page
+
+        Returns:
+            True if successful
+        """
+        pass
+
+    @abstractmethod
     async def add_chips(self, page: Page, amount: Optional[int] = None) -> bool:
         """Add chips while seated at the table.
 
