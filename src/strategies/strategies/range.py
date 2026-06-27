@@ -3,6 +3,7 @@ from src.strategies.action_plan import ActionPlan, ActionType
 from src.strategies.game_state import GameState
 from src.strategies.utils import PreflopRangeManager, get_position_code, normalize_hand_string, BoardAnalyzer, EquityCalculator
 from src.strategies.utils.game_utils import get_randomized_amount
+from src.strategies.utils.tactical_calc import TacticalCalculator
 
 
 class RangeStrategy(Strategy):
@@ -46,8 +47,12 @@ class RangeStrategy(Strategy):
         if not state.hole_cards:
             return ActionPlan(ActionType.CHECK, reasoning="Wait for cards")
 
-        spr = state.total_chips / max(1, state.pot)
-        is_preflop = not state.community_cards
+        # 预计算战术上下文
+        self._compute_tactical_context(state)
+        tc = state.tactical_context
+
+        spr = tc.spr
+        is_preflop = tc.is_preflop
 
         # 1. 牌力评估
         if is_preflop:
@@ -56,8 +61,16 @@ class RangeStrategy(Strategy):
             pp = 0.0
             hs = 0.0
         else:
+            # 使用蒙特卡洛 equity 替代 points/8000 作为 hs
+            num_opp = tc.num_opponents
+            equity = self.equity_calc.calculate_equity(
+                state.hole_cards, state.community_cards, num_opp
+            )
+            hs = equity  # equity 本身就是 0-1 归一化的胜率
+
+            # hand_strength["points"] 仅作为绝对牌力分类的辅助信号
             hand_info = self.equity_calc.get_hand_strength(state.hole_cards, state.community_cards)
-            hs = hand_info["points"] / 8000.0
+            state.hand_strength = hand_info
             draws = hand_info.get("draws", {})
 
             pp = 0.0
@@ -69,6 +82,17 @@ class RangeStrategy(Strategy):
                 pp += 0.15
 
             ehs = hs + (1.0 - hs) * pp
+
+            # 集成 BoardAnalyzer：湿牌面扣减，干牌面增强
+            board_texture = self.board_analyzer.analyze(state.community_cards)
+            wetness = board_texture.get("wetness", 0.0)
+
+            if wetness > 0.5 and 0.30 < ehs < 0.65:
+                # 湿牌面：中等牌力 EHS 扣减（脆弱牌容易被打败）
+                ehs -= wetness * 0.05
+            elif wetness <= 0.3 and ehs > 0.65:
+                # 干牌面：强牌 EHS 增加（成牌更安全）
+                ehs += (1 - wetness) * 0.03
 
         # 2. 对手建模 (Tightness)
         tightness = 1.0
@@ -123,9 +147,9 @@ class RangeStrategy(Strategy):
                 reasoning=f"防守性弃牌: 面对超池下注({state.to_call}/{state.pot}), 对手紧凑度={tightness:.2f}"
             )
 
-        # 情况 E: 底池赔率跟注
+        # 情况 E: 底池赔率跟注（使用 tactical_context 的 pot_odds）
         else:
-            pot_odds = state.to_call / (state.pot + state.to_call) if (state.pot + state.to_call) > 0 else 0
+            pot_odds = tc.pot_odds
             call_threshold = pot_odds + 0.1 + safety_margin
             if ehs > call_threshold:
                 plan = ActionPlan(

@@ -55,18 +55,39 @@ def configure_arena():
     from src.platforms.arena.platform import ArenaConfig, ArenaPlayerConfig
 
     console.print()
-    num_players = IntPrompt.ask("玩家数量", default=3, choices=[str(i) for i in range(2, 7)])
+    num_players = IntPrompt.ask("玩家数量", default=3, choices=[str(i) for i in range(2, 10)])
+
+    # 筹码档位选择
+    bb = 10
+    stack_choice = Prompt.ask(
+        "筹码档位",
+        choices=["short", "medium", "deep", "custom"],
+        default="medium",
+    )
+    stack_presets = {"short": 50, "medium": 100, "deep": 200}
+    if stack_choice == "custom":
+        bb_count = IntPrompt.ask("每玩家BB数", default=100)
+        default_stack = bb_count * bb
+    else:
+        default_stack = stack_presets[stack_choice] * bb
 
     players: list[ArenaPlayerConfig] = []
+    # 动态获取可用策略列表（含版本化名称）
+    from src.strategies.strategy_manager import StrategyManager
+    sm = StrategyManager()
+    available = sm.list_available_strategies()
+    strategy_display = '/'.join(available) if available else '/'.join(AVAILABLE_STRATEGIES)
+    strategy_choices = available if available else AVAILABLE_STRATEGIES
+
     for i in range(num_players):
         console.print(f"\n[bold]Player {i + 1}:[/bold]")
         name = Prompt.ask("  名称", default=f"Player{i + 1}")
         strategy = Prompt.ask(
-            f"  策略 ({'/'.join(AVAILABLE_STRATEGIES)})",
-            choices=AVAILABLE_STRATEGIES,
-            default=AVAILABLE_STRATEGIES[i % len(AVAILABLE_STRATEGIES)]
+            f"  策略 ({strategy_display})",
+            choices=strategy_choices,
+            default=strategy_choices[i % len(strategy_choices)]
         )
-        initial_stack = IntPrompt.ask("  初始筹码", default=1000)
+        initial_stack = IntPrompt.ask("  初始筹码", default=default_stack)
         players.append(ArenaPlayerConfig(name=name, strategy=strategy, initial_stack=initial_stack))
 
     console.print()
@@ -81,8 +102,8 @@ def configure_arena():
     elif termination == "time":
         max_duration_min = IntPrompt.ask("最大持续时间(分钟)", default=10)
 
-    small_blind = IntPrompt.ask("小盲", default=1)
-    big_blind = IntPrompt.ask("大盲", default=2)
+    small_blind = IntPrompt.ask("小盲", default=5)
+    big_blind = IntPrompt.ask("大盲", default=10)
 
     return ArenaConfig(
         players=players,
@@ -97,6 +118,7 @@ def configure_arena():
 def configure_browser(args) -> dict:
     """配置浏览器平台"""
     from src.platforms.browser.browser_platform import BrowserPlatformConfig, TableSelectionStrategy
+    from src.utils.cli_player import PilotMode
 
     config = BrowserPlatformConfig.from_file()
     if args.stakes:
@@ -116,7 +138,7 @@ def configure_browser(args) -> dict:
             config.strategy_type = args.strategy
     config.headless = args.headless
 
-    return {"config": config, "cli_mode": getattr(args, 'cli', False)}
+    return {"config": config, "pilot_mode": getattr(args, 'pilot_mode', PilotMode.AUTO)}
 
 
 def print_report(report):
@@ -126,8 +148,13 @@ def print_report(report):
     table.add_column("策略")
     table.add_column("最终筹码", justify="right")
     table.add_column("盈亏", justify="right")
+    table.add_column("BB/100", justify="right")
+    table.add_column("AF", justify="right")
+    table.add_column("3B%", justify="right")
     table.add_column("VPIP%", justify="right")
     table.add_column("PFR%", justify="right")
+    table.add_column("WTSD%", justify="right")
+    table.add_column("W$SD%", justify="right")
     table.add_column("胜手数", justify="right")
 
     for ps in report.player_stats:
@@ -137,8 +164,13 @@ def print_report(report):
             ps.strategy,
             str(ps.final_stack),
             f"[{profit_style}]{ps.profit:+d}[/{profit_style}]",
+            f"{ps.bb_per_100:+.1f}",
+            f"{ps.af:.1f}",
+            f"{ps.three_bet_pct:.1f}",
             f"{ps.vpip:.1f}",
             f"{ps.pfr:.1f}",
+            f"{ps.wtsd:.1f}",
+            f"{ps.wsdp:.1f}",
             str(ps.hands_won),
         )
 
@@ -160,6 +192,118 @@ async def run_arena(config):
     report = await platform.run()
     print_report(report)
     await platform.shutdown()
+
+
+# ─── 调度注册表 ───
+
+from src.core.dispatch import SessionConfig, register_runner, get_runner
+
+
+@register_runner("arena", "competition")
+async def run_arena_competition(session: SessionConfig):
+    """Arena 对抗赛 runner"""
+    from src.platforms.arena.platform import ArenaConfig, ArenaPlayerConfig
+
+    gk = session.game_kwargs
+    players = []
+    strategies = list(AVAILABLE_STRATEGIES)
+    arena_players = gk.get("arena_players", len(strategies))
+
+    # 解析筹码配置
+    stack_config = gk.get("arena_stack")
+    bb = 10  # 默认大盲
+    stack_presets = {"short": 50, "medium": 100, "deep": 200}
+
+    for i in range(min(arena_players, 9)):
+        # 计算每玩家初始筹码
+        if stack_config:
+            parts = [s.strip() for s in stack_config.split(",")]
+            part = parts[i % len(parts)]
+            bb_count = stack_presets.get(part.lower())
+            if bb_count is None:
+                bb_count = int(part)
+            initial_stack = bb_count * bb
+        else:
+            initial_stack = 1000  # 默认 100BB
+
+        players.append(ArenaPlayerConfig(
+            name=f"Player{i + 1}",
+            strategy=strategies[i % len(strategies)],
+            initial_stack=initial_stack,
+        ))
+    config = ArenaConfig(players=players, max_rounds=gk.get("hands", 100))
+    await run_arena(config)
+
+
+@register_runner("arena", "mtt")
+async def run_arena_mtt(session: SessionConfig):
+    """Arena MTT runner"""
+    # 复用现有 run_mtt，构建兼容的 args 对象
+    from types import SimpleNamespace
+    args = SimpleNamespace(
+        pilot_mode=session.pilot,
+        mtt_entries=session.game_kwargs.get("mtt_entries", 18),
+        mtt_blinds=session.game_kwargs.get("mtt_blinds", "standard"),
+        mtt_stack=session.game_kwargs.get("mtt_stack", 1000),
+        mtt_fee=session.game_kwargs.get("mtt_fee", 100),
+        mtt_prize=session.game_kwargs.get("mtt_prize", None),
+    )
+    await run_mtt(args)
+
+
+@register_runner("arena", "sng")
+async def run_arena_sng(session: SessionConfig):
+    """Arena SNG runner"""
+    from types import SimpleNamespace
+    args = SimpleNamespace(
+        pilot_mode=session.pilot,
+        sng_preset=session.game_kwargs.get("sng_preset", None),
+        sng_fee=session.game_kwargs.get("sng_fee", 50),
+        sng_stack=session.game_kwargs.get("sng_stack", 1500),
+        sng_blinds=session.game_kwargs.get("sng_blinds", "turbo"),
+    )
+    await run_sng(args)
+
+
+@register_runner("arena", "ring")
+async def run_arena_ring(session: SessionConfig):
+    """Arena Ring runner"""
+    from src.platforms.arena.ring import RingConfig, RingPlayerConfig
+
+    strategies = ["gto", "range", "exploitative", "aggressive", "checkorfold"]
+    players = []
+    num_players = 4
+    has_human = session.pilot == PilotMode.ASSIST
+    gk = session.game_kwargs
+    for i in range(num_players):
+        is_human = has_human and i == 0
+        players.append(RingPlayerConfig(
+            name="You" if is_human else f"Player{i + 1}",
+            hand_strategy="gto" if is_human else strategies[i % len(strategies)],
+            table_strategy="default",
+            initial_bank=2000,
+            buyin_amount=gk.get("ring_buyin", 200),
+            is_human=is_human,
+            pilot_mode=session.pilot if is_human else PilotMode.AUTO,
+        ))
+    config = RingConfig(players=players, max_rounds=gk.get("hands", 100))
+    await run_ring(config, has_human=has_human)
+
+
+@register_runner("browser", "ring")
+async def run_browser_ring(session: SessionConfig):
+    """Browser Ring (ReplayPoker) runner"""
+    from types import SimpleNamespace
+    args = SimpleNamespace(
+        pilot_mode=session.pilot,
+        mode="replaypoker",
+        strategy=session.strategy or None,
+        headless=session.platform_kwargs.get("headless", False),
+        stakes=session.platform_kwargs.get("stakes", None),
+        buyin=session.game_kwargs.get("buyin", "min"),
+        hands=session.game_kwargs.get("hands", 0),
+    )
+    await run_replaypoker(args)
 
 
 def configure_mtt():
@@ -184,8 +328,10 @@ def configure_mtt():
 async def run_mtt(args=None):
     """运行 MTT 锦标赛"""
     from src.platforms.arena.mtt import MTTConfig, MTTPlayerConfig, PrizePayout, MTTManager
+    from src.utils.cli_player import PilotMode
 
-    has_human = getattr(args, 'human', False) if args else False
+    pilot_mode = getattr(args, 'pilot_mode', PilotMode.AUTO) if args else PilotMode.AUTO
+    has_human = pilot_mode == PilotMode.ASSIST
 
     if args and args.mtt_entries:
         entries = args.mtt_entries
@@ -220,23 +366,11 @@ async def run_mtt(args=None):
             strategy="mixed",
             starting_stack=config.starting_stack,
             is_human=is_human,
+            pilot_mode=pilot_mode if is_human else PilotMode.AUTO,
         ))
 
     manager.register_players(player_configs)
     manager.initial_seating()
-
-    # 人类玩家替换
-    if has_human:
-        from src.platforms.arena.tournament_cli import CLITournamentPlayer
-        for pid, agent in manager.player_agents.items():
-            pc = None
-            for i, cfg in enumerate(manager.player_configs):
-                if f"mtt_p{i}" == pid:
-                    pc = cfg
-                    break
-            if pc and pc.is_human:
-                CLITournamentPlayer.create(agent)
-                console.print(f"[bold cyan]{agent.name} 已切换为 CLI 人类玩家[/bold cyan]")
 
     console.print("\n[bold green]MTT 锦标赛开始...[/bold green]\n")
     report = await manager.run()
@@ -326,8 +460,8 @@ def configure_ring():
             buyin_amount=buyin_amount,
         ))
 
-    small_blind = IntPrompt.ask("小盲", default=1)
-    big_blind = IntPrompt.ask("大盲", default=2)
+    small_blind = IntPrompt.ask("小盲", default=5)
+    big_blind = IntPrompt.ask("大盲", default=10)
     max_rounds = IntPrompt.ask("最大手数", default=200)
 
     return RingConfig(
@@ -341,20 +475,9 @@ def configure_ring():
 async def run_ring(config, has_human=False):
     """运行 Ring Game"""
     from src.platforms.arena.ring import RingPlatform, RingPlayer
-    from src.core.messaging import AsyncChannel, Message, MessageType
 
     platform = RingPlatform(config)
     await platform.initialize()
-
-    # 如果有人类玩家，将对应 RingPlayer 的决策钩子替换为 CLI 输入
-    if has_human:
-        from src.platforms.arena.ring_cli import CLIRingPlayer
-        for i, pc in enumerate(config.players):
-            if pc.is_human:
-                player_id = f"ring_player_{i}"
-                player = platform.players[player_id]
-                CLIRingPlayer.create(player)
-                console.print(f"[bold cyan]{player.name} 已切换为 CLI 人类玩家[/bold cyan]")
 
     console.print("\n[bold green]Ring Game 开始...[/bold green]\n")
     report = await platform.run()
@@ -403,8 +526,10 @@ async def run_sng(args=None):
     """运行 Sit & Go 单桌赛"""
     from src.platforms.arena.sitngo import SNGConfig, SitAndGo
     from src.platforms.arena.mtt import MTTPlayerConfig
+    from src.utils.cli_player import PilotMode
 
-    has_human = getattr(args, 'human', False) if args else False
+    pilot_mode = getattr(args, 'pilot_mode', PilotMode.AUTO) if args else PilotMode.AUTO
+    has_human = pilot_mode == PilotMode.ASSIST
 
     if args and hasattr(args, 'sng_preset') and args.sng_preset:
         config = SNGConfig(
@@ -426,23 +551,11 @@ async def run_sng(args=None):
             strategy=strategies[i % len(strategies)],
             starting_stack=config.starting_stack,
             is_human=is_human,
+            pilot_mode=pilot_mode if is_human else PilotMode.AUTO,
         ))
 
     manager.register_players(player_configs)
     manager.initial_seating()
-
-    # 人类玩家替换
-    if has_human:
-        from src.platforms.arena.tournament_cli import CLITournamentPlayer
-        for pid, agent in manager.player_agents.items():
-            pc = None
-            for i, cfg in enumerate(manager.player_configs):
-                if f"sng_p{i}" == pid:
-                    pc = cfg
-                    break
-            if pc and pc.is_human:
-                CLITournamentPlayer.create(agent)
-                console.print(f"[bold cyan]{agent.name} 已切换为 CLI 人类玩家[/bold cyan]")
 
     console.print("\n[bold green]Sit & Go 开始...[/bold green]\n")
     report = await manager.run()
@@ -493,9 +606,10 @@ async def _browser_cli_decide(state, actions: dict) -> dict:
         build_default,
         prompt_hand_action,
     )
+    from src.core.payload import browser_state_to_payload
 
     # 将 PokerGameState + actions dict 转为统一 payload schema
-    payload = _browser_state_to_payload(state, actions)
+    payload = browser_state_to_payload(state, actions)
     to_call = int(actions.get("to_call", 0) or 0)
 
     # GTO 策略默认（gto 是 balanced 的别名）
@@ -538,135 +652,14 @@ async def _browser_cli_decide(state, actions: dict) -> dict:
     return {"action": action, "amount": amount}
 
 
-def _browser_state_to_payload(state, actions: dict) -> dict:
-    """将浏览器 (PokerGameState, actions) 转为统一 schema 的 payload"""
-    pot = getattr(state, "pot", 0) if state else 0
-    to_call = int(actions.get("to_call", 0) or 0)
-    min_raise = int(actions.get("min_raise", 0) or (getattr(state, "min_raise", 0) if state else 0) or 0)
-    max_raise = int(actions.get("max_raise", 0) or 0)
-    hole = list(getattr(state, "hole_cards", []) or []) if state else []
-    board = list(getattr(state, "community_cards", []) or []) if state else []
-    my_seat = getattr(state, "my_seat_id", None) if state else None
-    players = getattr(state, "players", {}) if state else {}
-
-    # 当前阶段：浏览器用 prefs 标识，简化为 preflop/flop/turn/river
-    board_n = len(board)
-    if board_n == 0:
-        stage = "preflop"
-    elif board_n == 3:
-        stage = "flop"
-    elif board_n == 4:
-        stage = "turn"
-    else:
-        stage = "river"
-
-    available = list(actions.get("available", []) or [])
-    # 浏览器侧 "bet" 跟 "raise" 在显示层等价，统一为 raise
-    norm_available = []
-    for a in available:
-        if a == "bet":
-            norm_available.append("RAISE")
-        else:
-            norm_available.append(a.upper())
-
-    players_data = {}
-    for sid, p in players.items():
-        players_data[str(sid)] = {
-            "user_id": str(sid),
-            "name": getattr(p, "name", "") or f"Seat{sid}",
-            "chips": getattr(p, "chips", 0),
-            "is_active": getattr(p, "status", "active") not in ("folded", "sit_out"),
-            "status": getattr(p, "status", "active"),
-            "bet": getattr(p, "bet", 0),
-            "is_acting": getattr(p, "is_acting", False),
-        }
-
-    return {
-        "my_seat_id": my_seat,
-        "hole_cards": hole,
-        "community_cards": board,
-        "pot": pot,
-        "to_call": to_call,
-        "min_raise": min_raise,
-        "max_raise": max_raise,
-        "available_actions": norm_available,
-        "current_stage": stage,
-        "players": players_data,
-    }
-
-
-def _render_browser_state(state, actions: dict, available: list):
-    """渲染与 CLI 模式对齐的桌桌状态：底池、公共牌、座位、玩家列表"""
-    pot = getattr(state, "pot", 0) if state else 0
-    pot_rake = getattr(state, "pot_rake", 0) if state else 0
-    rake = getattr(state, "rake", 0) if state else 0
-    community_cards = getattr(state, "community_cards", []) if state else []
-    my_seat_id = getattr(state, "my_seat_id", None) if state else None
-    hole_cards = getattr(state, "hole_cards", []) if state else []
-    min_raise = getattr(state, "min_raise", 0) if state else 0
-    to_call = actions.get("to_call", 0)
-    players = getattr(state, "players", {}) if state else {}
-
-    # 底池行（含抽税）
-    pot_parts = [f"底池 [bold yellow]{pot}[/bold yellow]"]
-    if pot_rake > 0:
-        pot_parts.append(f"税后 [bold]{pot_rake}[/bold]")
-    if rake > 0:
-        pot_parts.append(f"抽税 [dim]{rake}[/dim]")
-
-    # 公共牌
-    board_line = ""
-    if community_cards:
-        board_line = f"\n公共牌: [bold cyan]{' '.join(community_cards)}[/bold cyan]"
-
-    # 手牌
-    hole_line = ""
-    if hole_cards:
-        hole_line = f"\n手牌:   [bold magenta]{' '.join(hole_cards)}[/bold magenta]"
-
-    # 关键信息行
-    key_line = (
-        f"  |  需跟注 [bold]{to_call}[/bold]"
-        f"  |  最小加注 [bold]{min_raise}[/bold]"
-        f"  |  我的座位 [bold]{my_seat_id}[/bold]"
-    )
-
-    console.print(Panel(
-        "  ".join(pot_parts) + key_line + hole_line + board_line,
-        title="[bold]你的回合 (浏览器)[/bold]",
-        border_style="green",
-    ))
-
-    # 玩家列表
-    if players:
-        console.print("[bold]玩家:[/bold]")
-        status_marker = {
-            "active": "[green]●[/green]",
-            "folded": "[dim]✕ 弃牌[/dim]",
-            "all_in": "[red]▲ 全押[/red]",
-            "sit_out": "[yellow]○ 暂离[/yellow]",
-        }
-        for seat_id in sorted(players.keys()):
-            p = players[seat_id]
-            marker = status_marker.get(p.status, f"[{p.status}]")
-            acting = " [bold cyan]<- 行动中[/bold cyan]" if getattr(p, "is_acting", False) else ""
-            me = " [bold magenta](我)[/bold magenta]" if seat_id == my_seat_id else ""
-            name = getattr(p, "name", "") or f"Seat{seat_id}"
-            chips = getattr(p, "chips", 0)
-            console.print(
-                f"  [dim]{seat_id:>2}[/dim]  {marker}  [bold]{name}[/bold]{me}  "
-                f"筹码 [yellow]{chips}[/yellow]{acting}"
-            )
-
-
 async def run_replaypoker(args):
     """运行 ReplayPoker 浏览器模式"""
     from src.platforms.browser.browser_platform import BrowserPlatform, BrowserPlatformConfig
+    from src.utils.cli_player import PilotMode
 
     config_data = configure_browser(args)
     config: BrowserPlatformConfig = config_data["config"]
-    cli_mode = config_data["cli_mode"]
-    has_human = getattr(args, 'human', False)
+    pilot_mode: PilotMode = config_data["pilot_mode"]
 
     # 解析 --buyin 参数（min/max/default/整数），人类和自动模式共用，默认 min
     raw_buyin = getattr(args, "buyin", "min")
@@ -682,98 +675,87 @@ async def run_replaypoker(args):
         buyin_amount = raw_buyin
     bot_logger.info(f"买入策略: {buyin_amount}")
 
-    if cli_mode:
-        # 完全手动浏览器控制
-        from src.main_browser import BrowserTestCLI
-        cli = BrowserTestCLI(config=config, headless=args.headless)
-        await cli.run()
-    else:
-        # 自动模式：使用 BrowserAutoPlayer 编排
-        mode_label = "人类" if has_human else "自动"
-        console.print(f"\n[bold]=== ReplayPoker {mode_label}模式 ===[/bold]")
-        config.auto_mode = True
-        platform = BrowserPlatform(config=config)
+    # 统一使用 BrowserAutoPlayer，通过 pilot_mode 区分行为
+    _PILOT_LABELS = {
+        PilotMode.AUTO: "无人",
+        PilotMode.MANAGED: "托管",
+        PilotMode.ASSIST: "辅助",
+    }
+    mode_label = _PILOT_LABELS.get(pilot_mode, "自动")
+    console.print(f"\n[bold]=== ReplayPoker {mode_label}模式 ===[/bold]")
+    config.auto_mode = True
+    platform = BrowserPlatform(config=config)
 
-        if has_human:
-            # 人类模式：仍使用旧循环但加上新能力
-            await platform.initialize()
-            try:
-                logged_in = await platform.ensure_logged_in()
-                if not logged_in:
-                    console.print("[red]登录失败，退出[/red]")
-                    await platform.shutdown()
-                    return
+    from src.platforms.browser.auto_player import BrowserAutoPlayer
 
-                table_id = await platform.open_table()
-                if not table_id:
-                    console.print("[red]无可用桌子，退出[/red]")
-                    await platform.shutdown()
-                    return
+    auto_player = BrowserAutoPlayer(
+        platform=platform,
+        strategy_type=config.strategy_type,
+        buyin_amount=buyin_amount,
+        pilot_mode=pilot_mode,
+    )
+    await auto_player.run()
 
-                await asyncio.sleep(2)
-                await platform._check_and_sit_in(table_id, buyin_amount)
 
-                from src.core.interfaces import GameAction, ActionType
+def _resolve_session(args) -> tuple:
+    """将 --mode / --platform / --game 统一解析为 (platform, game, pilot) 三元组
 
-                while True:
-                    # 弹窗处理 + WS 健康 + 入座检查
-                    await platform._dismiss_overlays(table_id)
-                    await platform._ensure_ws_alive(table_id)
-                    await platform._check_and_sit_in(table_id, buyin_amount)
+    优先级：--platform + --game > --mode
+    使用 --mode 时打印黄色废弃提示
+    """
+    from src.utils.cli_player import PilotMode
 
-                    state = await platform.get_game_state(table_id)
-                    actions = await platform.get_available_actions(table_id)
+    pilot = args.pilot_mode
 
-                    if actions.get("available"):
-                        decision = await _browser_cli_decide(state, actions)
-                        if decision:
-                            action_type_str = decision.get("action")
-                            amount = decision.get("amount", 0)
-                            action_map = {
-                                "fold": ActionType.FOLD,
-                                "check": ActionType.CHECK,
-                                "call": ActionType.CALL,
-                                "raise": ActionType.RAISE,
-                                "bet": ActionType.BET,
-                            }
-                            action = GameAction(
-                                action_type=action_map.get(action_type_str, ActionType.FOLD),
-                                amount=amount,
-                            )
-                            await platform.execute_action(action, table_id)
-                            console.print(f"动作: {action_type_str} {amount}")
-                            await asyncio.sleep(3)
-                    else:
-                        await asyncio.sleep(1)
-            finally:
-                await platform.shutdown()
-        else:
-            # 全自动模式：BrowserAutoPlayer
-            from src.platforms.browser.auto_player import BrowserAutoPlayer
+    # 新参数优先
+    if getattr(args, 'platform', None) and getattr(args, 'game', None):
+        return args.platform, args.game, pilot
 
-            auto_player = BrowserAutoPlayer(
-                platform=platform,
-                strategy_type=config.strategy_type,
-                buyin_amount=buyin_amount,
-            )
-            await auto_player.run()
+    # 旧 --mode 映射
+    mode = getattr(args, 'mode', None)
+    if mode:
+        console.print(
+            "[yellow]提示: --mode 参数已废弃，请使用 --platform <arena|browser> --game <ring|mtt|sng|competition>[/yellow]"
+        )
+        _MODE_MAP = {
+            "arena":       ("arena", "competition", pilot),
+            "mtt":         ("arena", "mtt", pilot),
+            "sng":         ("arena", "sng", pilot),
+            "ring":        ("arena", "ring", pilot),
+            "replaypoker": ("browser", "ring", pilot),
+            "auto":        ("browser", "ring", PilotMode.AUTO),
+            "cli":         ("browser", "ring", PilotMode.ASSIST),
+        }
+        if mode in _MODE_MAP:
+            return _MODE_MAP[mode]
+
+    # 无参数：交互式
+    return None
 
 
 def parse_args():
     """解析命令行参数"""
+    from src.utils.cli_player import PilotMode
+
     parser = argparse.ArgumentParser(description="德州扑克 AI")
     parser.add_argument(
         "mode",
         nargs="?",
         choices=["arena", "mtt", "sng", "ring", "replaypoker", "auto", "cli"],
         default=None,
-        help="运行模式: arena/mtt/sng/ring/replaypoker/auto/cli"
+        help="运行模式 (已废弃，请使用 --platform + --game)"
     )
+    parser.add_argument("--platform", choices=["arena", "browser"], default=None,
+                        help="平台选择: arena(本地模拟) | browser(浏览器在线)")
+    parser.add_argument("--game", choices=["ring", "mtt", "sng", "competition"], default=None,
+                        help="游戏类型: ring(现金桌) | mtt(多桌赛) | sng(单桌赛) | competition(对抗赛)")
     parser.add_argument("--headless", action="store_true", help="浏览器无头模式")
     parser.add_argument("--stakes", help="偏好盲注级别 (如 1/2, 5/10)")
     parser.add_argument("--strategy", help="策略类型 (扑克策略: gto/range/exploitative/checkorfold/aggressive/neural, 或桌子选择: fifo/most/least/random)")
-    parser.add_argument("--arena-hands", type=int, default=100, help="Arena 模式手数")
-    parser.add_argument("--arena-players", type=int, default=3, help="Arena 模式玩家数")
+    parser.add_argument("--hands", type=int, default=100, help="游戏手数（所有模式通用）")
+    parser.add_argument("--arena-players", type=int, default=7, help="Arena 模式玩家数")
+    parser.add_argument("--arena-stack", type=str, default=None,
+                        help="筹码配置: short(50BB)/medium(100BB)/deep(200BB) 或逗号分隔每玩家BB数 (如 short,deep,medium)")
     # MTT 参数
     parser.add_argument("--mtt-entries", type=int, default=18, help="MTT 参赛人数")
     parser.add_argument("--mtt-blinds", choices=["standard", "turbo", "deepstack"], default="standard", help="MTT 盲注结构")
@@ -786,16 +768,37 @@ def parse_args():
     parser.add_argument("--sng-stack", type=int, default=1500, help="SNG 起始筹码")
     parser.add_argument("--sng-fee", type=int, default=50, help="SNG 买入费")
     # Ring 参数
-    parser.add_argument("--ring-hands", type=int, default=100, help="Ring Game 手数")
     parser.add_argument("--ring-buyin", type=int, default=200, help="Ring Game 买入金额")
-    # 通用参数
-    parser.add_argument("--human", action="store_true", help="启用人类玩家（CLI 交互）")
-    parser.add_argument("--cli", action="store_true", help="ReplayPoker 完全手动浏览器控制")
-    parser.add_argument("--hands", type=int, default=0, help="ReplayPoker 限定手数（0=无限）")
+    # 参与度控制
+    parser.add_argument(
+        "--pilot",
+        choices=["auto", "managed", "assist"],
+        default="auto",
+        dest="pilot",
+        help="人类参与程度: auto(无人)/managed(托管)/assist(辅助) (默认: auto)"
+    )
+    # 兼容别名（已废弃）
+    parser.add_argument("--human", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--cli", action="store_true", help=argparse.SUPPRESS)
+    # 其他参数
     parser.add_argument("--buyin", default="min",
                         help="ReplayPoker 买入量：min/max/default 或具体整数（默认 min）")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="WARNING", help="控制台日志级别 (默认: WARNING)")
-    return parser.parse_args()
+
+    args = parser.parse_args()
+
+    # 兼容别名处理：--human → --pilot assist, --cli → --pilot assist
+    if getattr(args, 'human', False):
+        console.print("[yellow]警告: --human 已废弃，请使用 --pilot assist[/yellow]")
+        args.pilot = "assist"
+    if getattr(args, 'cli', False):
+        console.print("[yellow]警告: --cli 已废弃，请使用 --pilot assist[/yellow]")
+        args.pilot = "assist"
+
+    # 将字符串 pilot 值转为 PilotMode 枚举
+    args.pilot_mode = PilotMode(args.pilot)
+
+    return args
 
 
 async def main():
@@ -803,88 +806,67 @@ async def main():
 
     # 设置日志级别
     from src.utils.logger import set_log_level
+    from src.utils.cli_player import PilotMode
     set_log_level(args.log_level)
 
-    # MTT 模式
-    if args.mode == "mtt":
-        await run_mtt(args)
-        return
-
-    # SNG 模式
-    if args.mode == "sng":
-        await run_sng(args)
-        return
-
-    # Ring 模式
-    if args.mode == "ring":
-        from src.platforms.arena.ring import RingConfig, RingPlayerConfig
-
-        strategies = ["gto", "range", "exploitative", "aggressive", "checkorfold"]
-        players = []
-        num_players = 4
-        for i in range(num_players):
-            is_human = args.human and i == 0
-            players.append(RingPlayerConfig(
-                name="You" if is_human else f"Player{i + 1}",
-                hand_strategy="gto" if is_human else strategies[i % len(strategies)],
-                table_strategy="default",
-                initial_bank=2000,
-                buyin_amount=args.ring_buyin,
-                is_human=is_human,
-            ))
-        config = RingConfig(players=players, max_rounds=args.ring_hands)
-        await run_ring(config, has_human=args.human)
-        return
-
-    # 如果直接指定了 arena 模式，跳过交互选择
-    if args.mode == "arena":
-        from src.platforms.arena.platform import ArenaConfig, ArenaPlayerConfig
-
-        players = []
-        strategies = ["gto", "range", "exploitative"]
-        for i in range(min(args.arena_players, 6)):
-            players.append(ArenaPlayerConfig(
-                name=f"Player{i + 1}",
-                strategy=strategies[i % len(strategies)],
-                initial_stack=1000,
-            ))
-        config = ArenaConfig(players=players, max_rounds=args.arena_hands)
-        await run_arena(config)
-        return
-
-    # ReplayPoker 浏览器模式
-    if args.mode == "replaypoker":
-        await run_replaypoker(args)
-        return
-
-    # auto 模式 = ReplayPoker 自动模式
-    if args.mode == "auto":
-        args.mode = "replaypoker"
-        await run_replaypoker(args)
-        return
-
-    # cli 模式 = ReplayPoker 手动浏览器控制
-    if args.mode == "cli":
-        args.mode = "replaypoker"
-        args.cli = True
-        await run_replaypoker(args)
-        return
+    # 解析会话三元组
+    session = _resolve_session(args)
 
     # 无参数：交互式选择平台
-    platform_type = select_platform()
+    if session is None:
+        platform_type = select_platform()
+        if platform_type == "arena":
+            config = configure_arena()
+            await run_arena(config)
+        elif platform_type == "mtt":
+            await run_mtt()
+        elif platform_type == "sng":
+            await run_sng()
+        elif platform_type == "ring":
+            config = configure_ring()
+            await run_ring(config)
+        elif platform_type == "replaypoker":
+            await run_replaypoker(args)
+        return
 
-    if platform_type == "arena":
-        config = configure_arena()
-        await run_arena(config)
-    elif platform_type == "mtt":
-        await run_mtt()
-    elif platform_type == "sng":
-        await run_sng()
-    elif platform_type == "ring":
-        config = configure_ring()
-        await run_ring(config)
-    elif platform_type == "replaypoker":
-        await run_replaypoker(args)
+    platform, game, pilot = session
+
+    # cli 模式的废弃提示
+    if args.mode == "cli":
+        console.print("[yellow]提示: 'cli' 模式已废弃，请使用 '--platform browser --game ring --pilot assist'[/yellow]")
+
+    # 尝试通过注册表调度
+    runner = get_runner(platform, game)
+    if runner:
+        session_config = SessionConfig(
+            platform=platform,
+            game=game,
+            pilot=pilot,
+            strategy=args.strategy or "gto",
+            platform_kwargs={
+                "headless": args.headless,
+                "stakes": args.stakes,
+            },
+            game_kwargs={
+                "hands": args.hands,
+                "arena_players": args.arena_players,
+                "arena_stack": args.arena_stack,
+                "mtt_entries": args.mtt_entries,
+                "mtt_blinds": args.mtt_blinds,
+                "mtt_stack": args.mtt_stack,
+                "mtt_fee": args.mtt_fee,
+                "mtt_prize": args.mtt_prize,
+                "sng_preset": args.sng_preset,
+                "sng_blinds": args.sng_blinds,
+                "sng_stack": args.sng_stack,
+                "sng_fee": args.sng_fee,
+                "ring_buyin": args.ring_buyin,
+                "buyin": args.buyin,
+            },
+        )
+        await runner(session_config)
+    else:
+        console.print(f"[red]未知组合: platform={platform} game={game}[/red]")
 
 
 if __name__ == "__main__":

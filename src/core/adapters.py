@@ -1,9 +1,9 @@
 """
 Adapters for connecting existing components to the new core interfaces.
 
-This module provides adapters to:
-- Adapt existing Strategy classes to PlayerAgent interface
-- Adapt existing GameState to the core GameState
+.. deprecated::
+    StrategyToAgentAdapter 和 create_strategy_agent 已废弃，
+    请使用 PilotDecider（src.core.pilot_decider）替代。
 """
 
 from typing import Dict, Any
@@ -95,6 +95,7 @@ class StrategyToAgentAdapter(PlayerAgent):
         strategy_state.max_raise = core_state.max_raise
         strategy_state.total_chips = core_state.total_chips
         strategy_state.current_stage = core_state.current_stage
+        strategy_state.big_blind = getattr(core_state, 'big_blind', 2)
         
         # Convert available actions to strings
         strategy_state.available_actions = [
@@ -139,6 +140,7 @@ def create_strategy_agent(strategy_name: str) -> PlayerAgent:
         CheckOrFoldStrategy,
         AggressiveStrategy,
         NeuralStrategy,
+        GtoSolverStrategy,
     )
     
     strategy_map = {
@@ -148,7 +150,8 @@ def create_strategy_agent(strategy_name: str) -> PlayerAgent:
         "checkorfold": CheckOrFoldStrategy,
         "aggressive": AggressiveStrategy,
         "neural": NeuralStrategy,
-        "gto": BalancedStrategy,
+        "gto": GtoSolverStrategy,
+        "gto_solver": GtoSolverStrategy,
     }
     
     if strategy_name not in strategy_map:

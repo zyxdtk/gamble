@@ -41,8 +41,8 @@ class ArenaPlayerConfig:
 class ArenaConfig:
     """竞技场比赛配置"""
     players: List[ArenaPlayerConfig]
-    small_blind: int = 1
-    big_blind: int = 2
+    small_blind: int = 5
+    big_blind: int = 10
     termination: str = "rounds"  # "rounds", "last_standing", "time"
     max_rounds: int = 100
     max_duration_min: Optional[int] = None
@@ -61,6 +61,13 @@ class PlayerStats:
     hands_played: int
     total_rebuys: int = 0
     locked_profit: int = 0
+    # 风格量化指标
+    af: float = 0.0
+    three_bet_pct: float = 0.0
+    wtsd: float = 0.0
+    wsdp: float = 0.0
+    bb_per_100: float = 0.0
+    avg_pot_won: float = 0.0
 
 
 @dataclass
@@ -107,21 +114,20 @@ class ArenaPlatform(GamePlatform):
     async def initialize(self, **kwargs) -> None:
         """初始化竞技场平台"""
         strategy_names = [p.strategy for p in self._config.players]
-        initial_stacks = [p.initial_stack for p in self._config.players]
+        player_stacks = [p.initial_stack for p in self._config.players]
 
         self._competition = Competition(
             strategy_names=strategy_names,
-            initial_stack=initial_stacks[0] if len(set(initial_stacks)) == 1 else 1000,
+            initial_stack=player_stacks[0] if len(set(player_stacks)) == 1 else 1000,
             small_blind=self._config.small_blind,
             big_blind=self._config.big_blind,
+            player_stacks=player_stacks,
         )
 
-        # 如果玩家有不同的初始筹码，需要覆盖
+        # 设置玩家名称
         for i, pc in enumerate(self._config.players):
             if pc.name:
                 self._competition.agents[i].name = pc.name
-            if pc.initial_stack != 1000:
-                self._competition.engine.players[i].stack = pc.initial_stack
 
         # GamePlatform 兼容
         self._game_engine = self._competition.engine
@@ -169,7 +175,7 @@ class ArenaPlatform(GamePlatform):
         for h in range(max_rounds):
             dealer_idx = h % len(self._competition.agents)
             self._record_hand_start(h + 1, hand_log)
-            self._competition._run_single_hand(dealer_idx, h + 1)
+            await self._competition._run_single_hand(dealer_idx, h + 1)
             self._record_hand_result(h + 1, hand_log)
 
             if h % 10 == 9:
@@ -179,7 +185,7 @@ class ArenaPlatform(GamePlatform):
         """运行至唯一幸存者"""
         for h in range(max_rounds):
             dealer_idx = h % len(self._competition.agents)
-            self._competition._run_single_hand(dealer_idx, h + 1)
+            await self._competition._run_single_hand(dealer_idx, h + 1)
 
             active_count = sum(
                 1 for p in self._competition.engine.players if p.stack > 0
@@ -195,7 +201,7 @@ class ArenaPlatform(GamePlatform):
 
         while _time.time() < deadline:
             dealer_idx = h % len(self._competition.agents)
-            self._competition._run_single_hand(dealer_idx, h + 1)
+            await self._competition._run_single_hand(dealer_idx, h + 1)
             h += 1
 
     def _record_hand_start(self, hand_idx: int, hand_log: List[HandSummary]):
@@ -226,10 +232,31 @@ class ArenaPlatform(GamePlatform):
     def _build_player_stats(self) -> List[PlayerStats]:
         """构建玩家统计数据"""
         result = []
+        bb = self._config.big_blind
         for i, agent in enumerate(self._competition.agents):
             s = self._competition.stats[i]
-            vpip = (s['vpip_count'] / s['hands_played'] * 100) if s['hands_played'] > 0 else 0
-            pfr = (s['pfr_count'] / s['hands_played'] * 100) if s['hands_played'] > 0 else 0
+            hp = s['hands_played'] or 1
+            vpip = (s['vpip_count'] / hp * 100) if hp > 0 else 0
+            pfr = (s['pfr_count'] / hp * 100) if hp > 0 else 0
+
+            # AF = (bet + raise) / call
+            total_aggressive = s['bet_count'] + s['raise_count']
+            af = total_aggressive / s['call_count'] if s['call_count'] > 0 else float(total_aggressive)
+
+            # 3B%
+            three_bet_pct = (s['three_bet_count'] / s['three_bet_opps'] * 100) if s['three_bet_opps'] > 0 else 0
+
+            # WTSD% = saw_showdown / saw_flop
+            wtsd = (s['saw_showdown_count'] / s['saw_flop_count'] * 100) if s['saw_flop_count'] > 0 else 0
+
+            # W$SD% = won_at_showdown / saw_showdown
+            wsdp = (s['won_at_showdown'] / s['saw_showdown_count'] * 100) if s['saw_showdown_count'] > 0 else 0
+
+            # BB/100
+            bb_per_100 = (s['profit'] / bb) / hp * 100 if hp > 0 else 0
+
+            # Avg Pot
+            avg_pot_won = (s['total_pot_won'] / s['wins']) if s['wins'] > 0 else 0
 
             result.append(PlayerStats(
                 name=agent.name,
@@ -242,6 +269,12 @@ class ArenaPlatform(GamePlatform):
                 hands_played=s['hands_played'],
                 total_rebuys=s['total_rebuys'],
                 locked_profit=s['locked_profit'],
+                af=af,
+                three_bet_pct=three_bet_pct,
+                wtsd=wtsd,
+                wsdp=wsdp,
+                bb_per_100=bb_per_100,
+                avg_pot_won=avg_pot_won,
             ))
         return result
 
@@ -366,7 +399,7 @@ class ArenaPlatform(GamePlatform):
         self._event_bus.publish(EventType.DISCONNECTED, {"platform": "arena"})
         bot_logger.info("ArenaPlatform 已关闭")
 
-    def run_mtt(self, config: MTTConfig) -> MTTReport:
+    async def run_mtt(self, config: MTTConfig) -> MTTReport:
         """运行 MTT 锦标赛并返回报告"""
         from .mtt import MTTPlayerConfig
 
@@ -386,7 +419,7 @@ class ArenaPlatform(GamePlatform):
 
         manager.register_players(player_configs)
         manager.initial_seating()
-        return manager.run()
+        return await manager.run()
 
     def subscribe_events(self, callback: Callable[[GameEvent], None]) -> None:
         """订阅游戏事件"""

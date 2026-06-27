@@ -156,7 +156,7 @@ class WebSocketListener:
             if isinstance(c_cards, list) and len(c_cards) >= len(self.state["community_cards"]):
                 if c_cards != self.state["community_cards"]:
                     self.state["community_cards"] = c_cards
-                    bot_logger.debug(f"WS: Community Cards updated: {c_cards}")
+                    bot_logger.debug(f"[WS-公牌] 全量更新: {c_cards}")
         
         # 注意：update 中的 "pot" 单字段可能只是当前轮下注，不是累计总底池
         # 只有当它大于当前已知值时才更新（底池只会增长）
@@ -185,10 +185,17 @@ class WebSocketListener:
                     if card not in existing:
                         existing.append(card)
                 self.state["community_cards"] = existing
-                bot_logger.info(f"WS: Community Cards updated: {existing}")
+
+                # 判断街道名称
+                street_name = {3: "flop", 4: "turn", 5: "river"}.get(len(existing), "?")
+                bot_logger.info(f"[WS-公牌] {street_name}: {existing}")
+
                 # 新街道：重置本街下注（flop/turn/river 各自从 0 开始算）
                 if len(existing) in (3, 4, 5):
                     self._reset_street_bets()
+                    # 更新阶段
+                    if street_name != "?":
+                        self._current_stage = street_name
         
         elif action in ["updatePots", "awardPot"]:
             pots = update.get("pots", [])
@@ -210,7 +217,18 @@ class WebSocketListener:
             self._reset_street_bets()
             if "dealerSeat" in update:
                 self.state["dealer_seat"] = update.get("dealerSeat")
-            bot_logger.info(f"WS: New hand started (ID: {self.state['hand_id']})")
+
+            # 日志：新手牌关键信息
+            dealer = update.get("dealerSeat", "?")
+            bb = update.get("minimumRaise", self.state.get("big_blind", "?"))
+            player_count = sum(
+                1 for p in update.get("players", [])
+                if p.get("status") not in ["sitOut", "sit_out"]
+            )
+            bot_logger.info(
+                f"[WS-新手牌] id={self.state['hand_id']} "
+                f"dealer={dealer} BB={bb} 玩家数={player_count}"
+            )
 
             # VPIP/PFR: 新手牌开始时递增所有在座玩家的 hands
             for p in update.get("players", []):
@@ -225,6 +243,30 @@ class WebSocketListener:
         # VPIP/PFR 追踪：bet/call/raise/fold 动作
         elif action in ("bet", "call", "raise", "fold"):
             user_id = update.get("userId")
+            seat_id = update.get("seatId") if update.get("seatId") is not None else (update.get("seat") or self._seat_for_user(user_id))
+
+            # 日志：其他玩家动作摘要（只记关键信息）
+            amount = (
+                update.get("amount")
+                or update.get("raiseTo")
+                or update.get("betAmount")
+                or update.get("callAmount")
+                or update.get("chips")
+                or 0
+            )
+            is_me = (
+                user_id is not None
+                and str(user_id) == str(self.state.get("my_user_id"))
+            )
+            # 我的动作记 info，其他记 debug
+            log_fn = bot_logger.info if is_me else bot_logger.debug
+            log_fn(
+                f"[WS-{action.upper()}] seat={seat_id} "
+                f"amount={amount} "
+                f"{'(我)' if is_me else ''} "
+                f"stage={self._current_stage}"
+            )
+
             if user_id is not None:
                 self._vpip_ensure(user_id)
                 # preflop 阶段的 bet/call/raise 算 VPIP
@@ -250,13 +292,24 @@ class WebSocketListener:
         elif action in ["tick", "setActivePlayer"]:
             # 当前行动者
             current_player = update.get("currentPlayer") or update
-            seat = current_player.get("seatId") or current_player.get("seat")
+            seat = current_player.get("seatId") if current_player.get("seatId") is not None else current_player.get("seat")
             if seat is not None:
                 self.state["active_seat"] = seat
 
                 # 判断是否轮到我
+                was_my_turn = self.state["is_my_turn"]
                 if self.state["my_seat_id"] is not None:
                     self.state["is_my_turn"] = (seat == self.state["my_seat_id"])
+
+                    # 日志：轮到我时输出详情
+                    if self.state["is_my_turn"] and not was_my_turn:
+                        call_amount = update.get("callAmount", 0)
+                        min_raise = update.get("minimumRaise") or update.get("minRaise") or 0
+                        bot_logger.info(
+                            f"[WS-轮到我] seat={seat} "
+                            f"to_call={call_amount} min_raise={min_raise} "
+                            f"stage={self._current_stage}"
+                        )
 
                 # 更新玩家的 is_acting 标志
                 for s, player in self.state["players"].items():
@@ -284,7 +337,7 @@ class WebSocketListener:
         
         for p in update.get("players", []):
             p_cards = p.get("cards")
-            seat = p.get("seat") or p.get("seatId")
+            seat = p.get("seat") if p.get("seat") is not None else p.get("seatId")
             user_id = p.get("userId")
             
             if p_cards and len(p_cards) == 2:
@@ -296,7 +349,7 @@ class WebSocketListener:
                     if self.state["my_seat_id"] != seat:
                         self.state["my_seat_id"] = seat
                         self.state["my_user_id"] = user_id
-                        bot_logger.info(f"🎯 WS: Auto-detected identity from cards: seat={seat}, userId={user_id}")
+                        bot_logger.info(f"[WS-身份] 自动识别: seat={seat}, userId={user_id}")
                 
                 elif self.state["my_user_id"] and str(user_id) == str(self.state["my_user_id"]):
                     is_my_cards = True
@@ -307,7 +360,7 @@ class WebSocketListener:
                 
                 if is_my_cards:
                     self.state["hole_cards"] = p_cards
-                    bot_logger.info(f"WS: My Hole Cards: {p_cards} (Seat: {seat})")
+                    bot_logger.info(f"[WS-底牌] {p_cards} (seat={seat}, user={user_id})")
                 
                 # 更新玩家卡片
                 if seat is not None:
@@ -325,7 +378,7 @@ class WebSocketListener:
     def _update_players(self, players_data: list):
         """更新玩家信息"""
         for p_data in players_data:
-            seat = p_data.get("seat") or p_data.get("seatId")
+            seat = p_data.get("seat") if p_data.get("seat") is not None else p_data.get("seatId")
             if seat is None:
                 continue
             
@@ -371,7 +424,7 @@ class WebSocketListener:
             if self.state["my_user_id"] and str(user_id) == str(self.state["my_user_id"]):
                 if self.state["my_seat_id"] != seat:
                     self.state["my_seat_id"] = seat
-                    bot_logger.info(f"WS: Updated my_seat_id to {seat} (matched userId)")
+                    bot_logger.info(f"[WS-身份] 更新 seat={seat} (matched userId)")
     
     def get_state(self) -> Dict[str, Any]:
         """获取当前状态副本"""

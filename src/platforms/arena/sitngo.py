@@ -131,7 +131,8 @@ class SitAndGo:
                 strategy_name = strategies[i % len(strategies)]
 
             strategy = self._create_strategy(strategy_name)
-            agent = ArenaAgent(seat_id=0, strategy=strategy, player_id=player_id)
+            agent = ArenaAgent(seat_id=0, strategy=strategy, player_id=player_id,
+                               pilot_mode=cfg.pilot_mode)
             agent.name = cfg.name
 
             ps = PlayerState(seat_id=0, name=cfg.name, stack=cfg.starting_stack)
@@ -244,8 +245,11 @@ class SitAndGo:
         from src.strategies.strategies.aggressive import AggressiveStrategy
 
         strategy_type = strategy_type.lower()
-        if strategy_type in ("balanced", "gto"):
+        if strategy_type == "balanced":
             return BalancedStrategy(thinking_timeout=2.0)
+        elif strategy_type in ("gto", "gto_solver"):
+            from src.strategies.strategies.gto_solver import GtoSolverStrategy
+            return GtoSolverStrategy()
         elif strategy_type == "exploitative":
             return ExploitativeStrategy(thinking_timeout=2.0)
         elif strategy_type == "neural":

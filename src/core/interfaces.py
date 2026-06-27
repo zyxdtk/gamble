@@ -129,9 +129,10 @@ class GamePlatform(ABC):
 class PlayerAgent(ABC):
     """
     Abstract base class for a player agent.
-    
-    A PlayerAgent encapsulates a strategy and makes decisions based on game state.
-    It can be connected to any GamePlatform implementation.
+
+    .. deprecated::
+        请使用 PilotDecider（src.core.pilot_decider）替代。
+        PilotDecider 统一了 AI/人类决策编排，不再需要单独的 Agent 抽象。
     """
 
     @abstractmethod
@@ -159,8 +160,9 @@ class PlayerAgent(ABC):
 class GameRunner:
     """
     Orchestrates a game session between a PlayerAgent and a GamePlatform.
-    
-    This decouples the agent from the platform - any agent can run on any platform!
+
+    .. deprecated::
+        各平台自带游戏循环，不再需要统一的 GameRunner。
     """
 
     def __init__(self, platform: GamePlatform, agent: PlayerAgent):

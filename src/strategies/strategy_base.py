@@ -1,6 +1,6 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Dict, Optional
 import threading
 
 from .game_state import GameState
@@ -8,6 +8,7 @@ from .action_plan import ActionPlan, ActionType
 from .player_analysis import PlayerManager, get_player_tag
 from .utils import EquityCalculator, PreflopRangeManager, get_position_code, normalize_hand_string
 from .utils.game_utils import get_randomized_amount
+from .utils.tactical_calc import TacticalCalculator
 
 
 class Strategy(ABC):
@@ -15,6 +16,12 @@ class Strategy(ABC):
     策略引擎基类：感知与决策分离架构
     """
     strategy_name: str = "base"
+    strategy_version: int = 1
+
+    @property
+    def full_name(self) -> str:
+        """版本化全名，如 gto_v1"""
+        return f"{self.strategy_name}_v{self.strategy_version}"
 
     def __init__(self, thinking_timeout: float = 10.0):
         self.thinking_timeout = thinking_timeout
@@ -24,6 +31,43 @@ class Strategy(ABC):
         self._lock = threading.Lock()
         self._last_equity = 0.0
         self._last_hand_str = ""
+        # 预计算缓存：handle_event 更新，_compute_tactical_context 消费
+        self._cached_opponent_tags: Dict[str, str] = {}
+        self._cached_board_texture: Dict = {}
+        self._cached_fold_equity: float = 0.25
+        self._last_street_cards_hash: int = 0
+
+    def _compute_tactical_context(self, state: GameState) -> None:
+        """填充 state.tactical_context，供 make_decision 及其子方法使用。
+        优先使用 handle_event 中更新的缓存值，缓存为空时重新计算。
+        """
+        from .game_state import TacticalContext
+        tc = TacticalContext()
+
+        # 基础计算
+        tc.num_opponents = TacticalCalculator.calc_num_opponents(state)
+        tc.pot_odds = TacticalCalculator.calc_pot_odds(state)
+        tc.spr = TacticalCalculator.calc_spr(state)
+        tc.is_preflop = not state.community_cards
+        tc.street = TacticalCalculator.calc_street(state)
+        tc.position_code = get_position_code(state)
+        tc.hand_str = normalize_hand_string(state.hole_cards) if state.hole_cards else "XX"
+
+        # 对手标签：优先缓存
+        tc.opponent_tags = self._cached_opponent_tags if self._cached_opponent_tags else TacticalCalculator.calc_opponent_tags(state)
+
+        # 牌面纹理：优先缓存
+        tc.board_texture = self._cached_board_texture if self._cached_board_texture else {}
+
+        # fold equity：优先缓存
+        tc.fold_equity = self._cached_fold_equity if self._cached_fold_equity > 0 else 0.25
+
+        # avg_vpip
+        tc.avg_vpip = TacticalCalculator.calc_avg_vpip(state)
+
+        # equity 和 hand_strength 在 postflop 需要蒙特卡洛计算，
+        # 交给各策略的 make_decision 按需填充（因为计算开销大）
+        state.tactical_context = tc
 
     def handle_event(self, event_type: str, data: dict) -> None:
         """
@@ -33,16 +77,45 @@ class Strategy(ABC):
         if event_type == "action":
             # 默认同步到选手管理器
             self.player_mgr.update_opponent_range(
-                data.get("user_id"), 
-                data.get("action"), 
+                data.get("user_id"),
+                data.get("action"),
                 data.get("pot_ratio", 0.0)
             )
+            # 更新对手标签缓存
+            user_id = data.get("user_id", "")
+            if user_id:
+                self._cached_opponent_tags = TacticalCalculator.calc_opponent_tags_from_event(
+                    self._cached_opponent_tags, user_id, data
+                )
+            # 更新 fold equity 缓存
+            action = data.get("action", "")
+            if action == "fold":
+                self._cached_fold_equity = min(0.60, self._cached_fold_equity + 0.05)
+            elif action in ("raise", "call"):
+                self._cached_fold_equity = max(0.10, self._cached_fold_equity - 0.03)
+
         elif event_type == "showdown":
             self.player_mgr.record_showdown(
-                data.get("user_id"), 
-                data.get("hand_str"), 
+                data.get("user_id"),
+                data.get("hand_str"),
                 data.get("street")
             )
+            # 摊牌后更新对手标签缓存
+            user_id = data.get("user_id", "")
+            if user_id:
+                self._cached_opponent_tags = TacticalCalculator.calc_opponent_tags_from_event(
+                    self._cached_opponent_tags, user_id, data
+                )
+
+        elif event_type == "new_street":
+            # 新街道事件 → 更新牌面纹理缓存
+            community_cards = data.get("community_cards", [])
+            cards_hash = hash(tuple(community_cards))
+            if cards_hash != self._last_street_cards_hash:
+                from .utils.board_analyzer import BoardAnalyzer
+                ba = BoardAnalyzer()
+                self._cached_board_texture = ba.analyze(community_cards) if community_cards else {}
+                self._last_street_cards_hash = cards_hash
 
     @abstractmethod
     def make_decision(self, state: GameState) -> ActionPlan:
@@ -127,11 +200,162 @@ class Strategy(ABC):
         if not state.community_cards:
             plan = self._create_preflop_aggressive_plan(state, hand_str, pos_code)
         else:
-            # 翻牌后暂时复用平衡型，但可以根据需要进一步激进化
-            plan = self._create_postflop_balanced_plan(state, hand_str)
-        
+            plan = self._create_postflop_aggressive_plan(state, hand_str)
+
         plan.strategy_name = self.strategy_name
         plan.my_equity = self._last_equity
+        return plan
+
+    def _create_postflop_aggressive_plan(self, state: GameState, hand_str: str) -> ActionPlan:
+        """激进型翻牌后决策：比 balanced 更低的加注/跟注阈值、更大的下注尺度"""
+        num_opponents = TacticalCalculator.calc_num_opponents(state)
+        equity = self.equity_calc.calculate_equity(state.hole_cards, state.community_cards, num_opponents)
+        self._last_equity = equity
+        state.hand_strength = self.equity_calc.get_hand_strength(state.hole_cards, state.community_cards)
+
+        call_amount = state.to_call
+        pot = state.pot
+        pot_odds = TacticalCalculator.calc_pot_odds(state)
+        spr = TacticalCalculator.calc_spr(state)
+
+        # 激进阈值：比 balanced 更低
+        call_threshold = pot_odds - 0.05
+        raise_threshold = pot_odds + 0.10
+
+        # 短筹码更激进
+        if spr < 2.0:
+            call_threshold -= 0.15
+            raise_threshold -= 0.20
+
+        # 对手类型调整
+        opponents = [p for p in state.players.values() if p.is_active and p.status != "folded"]
+        is_against_nit = any(get_player_tag(p) == "紧逼 (Nit/Tight)" for p in opponents)
+        is_against_maniac = any(get_player_tag(p) == "疯子 (Maniac)" for p in opponents)
+        is_against_station = any(get_player_tag(p) == "跟注站 (Calling Station)" for p in opponents)
+
+        if is_against_nit:
+            call_threshold += 0.05
+            raise_threshold += 0.05
+        elif is_against_maniac:
+            call_threshold -= 0.05
+
+        # Continuation bet: Hero 是翻前加注者（后位且 to_call==0 暗示）且牌面不危险
+        is_preflop_raiser = call_amount == 0 and pot > state.big_blind * 3
+        board_texture = TacticalCalculator.calc_street(state) != "preflop" and state.tactical_context.board_texture if state.tactical_context else {}
+        is_dangerous_board = board_texture.get("wetness", 0) > 0.6 if board_texture else False
+
+        # EV 计算
+        active_opps = [p for p in opponents if p.seat_id != state.my_seat_id]
+        avg_vpip = sum(p.vpip for p in active_opps) / len(active_opps) if active_opps else 0.3
+        street = TacticalCalculator.calc_street(state)
+        fold_equity = self.equity_calc.estimate_fold_equity(avg_vpip, 0.0, street)
+
+        planned_raise = int(pot * 0.85) if pot > 0 else state.min_raise
+        ev_result = self.equity_calc.calculate_ev(equity=equity, pot=pot, to_call=call_amount,
+                                                   raise_amount=planned_raise, fold_equity=fold_equity)
+        opt_raise = self.equity_calc.find_optimal_raise_size(
+            equity=equity, pot=pot if pot > 0 else 1,
+            to_call=call_amount,
+            min_raise=state.min_raise if state.min_raise > 0 else 2,
+            stack=state.total_chips if state.total_chips > 0 else 999,
+            base_fold_equity=fold_equity,
+        )
+        optimal_amount = opt_raise["optimal_amount"]
+        optimal_hint = opt_raise["bet_size_hint"]
+        pot_odds_pct = pot_odds * 100
+        call_ev = ev_result.get("call_ev", 0)
+
+        # 超强牌: equity > 0.60 (balanced 为 0.70)
+        if equity > 0.60:
+            base_amount = int(pot * 1.0)
+            adjusted_amount = self._adjust_raise_amount(base_amount, state, equity,
+                                                         is_against_nit, is_against_maniac,
+                                                         is_against_station, num_opponents)
+            final_amount = max(adjusted_amount, optimal_amount)
+            plan = ActionPlan(ActionType.RAISE, primary_amount=get_randomized_amount(final_amount),
+                              bet_size_hint=optimal_hint,
+                              reasoning=f"Aggressive超强牌 ({hand_str}) Eq:{equity:.1%} PO:{pot_odds_pct:.1f}% EV:{call_ev:.1f}")
+            plan.my_equity = equity
+            plan.pot_odds = pot_odds
+            plan.ev = call_ev
+            return plan
+
+        # C-bet: 中等牌力 + 是翻前加注者 + 牌面不危险
+        if is_preflop_raiser and not is_dangerous_board and equity >= 0.35:
+            base_amount = int(pot * 0.55)
+            plan = ActionPlan(ActionType.RAISE, primary_amount=get_randomized_amount(base_amount),
+                              bet_size_hint="half_pot",
+                              reasoning=f"Aggressive C-bet ({hand_str}) Eq:{equity:.1%}")
+            plan.my_equity = equity
+            plan.pot_odds = pot_odds
+            plan.ev = call_ev
+            return plan
+
+        # 半诈唬提升: equity 0.40-0.55 区间更频繁加注
+        if 0.40 <= equity <= 0.55 and spr > 4:
+            semi_bluff_prob = 0.4 if not is_against_station else 0.1
+            base_amount = int(pot * 0.66)
+            adjusted_amount = self._adjust_raise_amount(base_amount, state, equity,
+                                                         is_against_nit, is_against_maniac,
+                                                         is_against_station, num_opponents)
+            sec_action = ActionType.CALL if call_amount > 0 else ActionType.CHECK
+            plan = ActionPlan(ActionType.RAISE, primary_amount=get_randomized_amount(adjusted_amount),
+                              secondary_action=sec_action, secondary_probability=1.0 - semi_bluff_prob,
+                              bet_size_hint=optimal_hint,
+                              reasoning=f"Aggressive半诈唬 ({hand_str}) Eq:{equity:.1%} SPR:{spr:.1f}")
+            plan.my_equity = equity
+            plan.pot_odds = pot_odds
+            plan.ev = call_ev
+            return plan
+
+        # 强牌加注
+        if equity > raise_threshold + 0.05:
+            base_amount = int(pot * 0.85)
+            adjusted_amount = self._adjust_raise_amount(base_amount, state, equity,
+                                                         is_against_nit, is_against_maniac,
+                                                         is_against_station, num_opponents)
+            final_amount = optimal_amount if opt_raise["optimal_ev"] > 0 else adjusted_amount
+            sec_action = ActionType.CALL if call_amount > 0 else ActionType.CHECK
+            plan = ActionPlan(ActionType.RAISE, primary_amount=get_randomized_amount(final_amount),
+                              secondary_action=sec_action, secondary_probability=0.15,
+                              bet_size_hint=optimal_hint,
+                              reasoning=f"Aggressive强牌 ({hand_str}) Eq:{equity:.1%} PO:{pot_odds_pct:.1f}% EV:{call_ev:.1f}")
+            plan.my_equity = equity
+            plan.pot_odds = pot_odds
+            plan.ev = call_ev
+            return plan
+
+        # 跟注区
+        if equity > call_threshold or call_ev > 0:
+            if call_ev <= 0 and equity < call_threshold + 0.05:
+                plan = ActionPlan(ActionType.CHECK, fallback_action=ActionType.FOLD, limit_amount=0,
+                                  reasoning=f"Aggressive EV为负弃牌 ({hand_str}) EV:{call_ev:.2f}")
+                plan.my_equity = equity
+                plan.pot_odds = pot_odds
+                plan.ev = call_ev
+                return plan
+            if is_against_station and equity < 0.35:
+                plan = ActionPlan(ActionType.CHECK, fallback_action=ActionType.FOLD, limit_amount=0,
+                                  reasoning=f"Aggressive对跟注站弃牌 ({hand_str})")
+                plan.my_equity = equity
+                plan.pot_odds = pot_odds
+                plan.ev = call_ev
+                return plan
+            reason = f"Aggressive跟注 ({hand_str}) Eq:{equity:.1%} PO:{pot_odds:.1%} EV:{call_ev:.1f}"
+            plan = ActionPlan(ActionType.CALL, limit_amount=int(pot * 0.3),
+                              fallback_action=ActionType.FOLD, reasoning=reason)
+            plan.my_equity = equity
+            plan.pot_odds = pot_odds
+            plan.ev = call_ev
+            return plan
+
+        # 弱牌弃牌
+        plan = ActionPlan(ActionType.FOLD if call_amount > 0 else ActionType.CHECK,
+                          fallback_action=ActionType.FOLD, limit_amount=0,
+                          reasoning=f"Aggressive弱牌弃牌 ({hand_str}) Eq:{equity:.1%} PO:{pot_odds_pct:.1f}%")
+        plan.my_equity = equity
+        plan.pot_odds = pot_odds
+        plan.ev = call_ev
         return plan
 
     def _create_preflop_aggressive_plan(self, state: GameState, hand_str: str, pos_code: str) -> ActionPlan:
@@ -323,7 +547,7 @@ class Strategy(ABC):
         if pos_code in ["EP", "UTG"]: adjusted = int(adjusted * 0.9)
         elif pos_code in ["LP", "BTN", "CO"]: adjusted = int(adjusted * 1.1)
 
-        bb = state.big_blind if hasattr(state, 'big_blind') and state.big_blind > 0 else 2
+        bb = state.big_blind if state.big_blind > 0 else 2
         min_raise = state.min_raise if state.min_raise > 0 else bb * 2
         return max(adjusted, min_raise)
 

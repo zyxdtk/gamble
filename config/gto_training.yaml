@@ -1,0 +1,56 @@
+# GTO训练配置
+# 用于 scripts/train_gto_cfr.py
+
+# ── 算法选择 ──────────────────────────────────────────
+algorithm: "mccfr"          # vanilla / cfrplus / mccfr
+# deep_cfr: true            # 是否启用DeepCFR（需要torch）
+
+# ── 抽象参数 ──────────────────────────────────────────
+card_abstraction:
+  flop_buckets: 10          # 翻牌equity bucket数
+  turn_buckets: 10          # 转牌equity bucket数
+  river_buckets: 10         # 河牌equity bucket数
+
+action_abstraction:
+  sizes:                    # 加注档位
+    - "min"
+    - "half_pot"
+    - "pot"
+    - "allin"
+
+# ── 游戏参数 ──────────────────────────────────────────
+game:
+  small_blind: 1
+  big_blind: 2
+  starting_stack: 100       # 50BB深度
+  num_opponents: 1          # HU (1个对手)
+
+# ── 训练参数 ──────────────────────────────────────────
+training:
+  iterations: 10000         # CFR迭代次数
+  # MCCFR专用
+  sampling_strategy: "external"  # external / outcome
+
+  # DeepCFR专用
+  deep_iterations: 100          # 外层迭代
+  deep_traversals: 100          # 每次迭代MCCFR遍历数
+  deep_buffer_size: 10000       # 训练数据buffer
+  deep_batch_size: 256          # 训练batch大小
+  deep_learning_rate: 0.001     # 学习率
+
+# ── 输出配置 ──────────────────────────────────────────
+output:
+  tables_path: "config/gto_tables.yaml"   # 策略表输出路径
+  model_dir: "data/gto"                   # 模型保存目录
+  log_interval: 1000                      # 日志间隔(迭代数)
+  save_interval: 5000                     # 模型保存间隔
+
+# ── 评估配置 ──────────────────────────────────────────
+evaluation:
+  arena_hands: 1000         # Arena对局数(评估策略强度)
+  opponent_strategy: "balanced"  # 对手策略
+  metrics:
+    - "win_rate"
+    - "bb_per_100"
+    - "vpip"
+    - "pfr"

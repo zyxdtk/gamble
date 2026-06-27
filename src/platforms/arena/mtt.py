@@ -18,6 +18,7 @@ from .game import PlayerState
 from .agent import ArenaAgent
 from .blind_schedule import BlindSchedule, BlindLevel, create_standard_schedule, create_turbo_schedule, create_deepstack_schedule
 from .table import TournamentTable
+from src.utils.cli_player import PilotMode
 
 arena_logger = logging.getLogger("arena")
 
@@ -29,6 +30,7 @@ class MTTPlayerConfig:
     strategy: str  # "gto", "range", "exploitative", "checkorfold", "aggressive", "neural", "icm"
     starting_stack: int = 1000
     is_human: bool = False
+    pilot_mode: PilotMode = PilotMode.AUTO
 
 
 @dataclass
@@ -140,7 +142,8 @@ class MTTManager:
                 strategy_name = strategies[i % len(strategies)]
 
             strategy = self._create_strategy(strategy_name)
-            agent = ArenaAgent(seat_id=0, strategy=strategy, player_id=player_id)
+            agent = ArenaAgent(seat_id=0, strategy=strategy, player_id=player_id,
+                               pilot_mode=cfg.pilot_mode)
             agent.name = cfg.name
 
             ps = PlayerState(seat_id=0, name=cfg.name, stack=cfg.starting_stack)
@@ -273,8 +276,11 @@ class MTTManager:
         from src.strategies.strategies.aggressive import AggressiveStrategy
 
         strategy_type = strategy_type.lower()
-        if strategy_type in ("balanced", "gto"):
+        if strategy_type == "balanced":
             return BalancedStrategy(thinking_timeout=2.0)
+        elif strategy_type in ("gto", "gto_solver"):
+            from src.strategies.strategies.gto_solver import GtoSolverStrategy
+            return GtoSolverStrategy()
         elif strategy_type == "exploitative":
             return ExploitativeStrategy(thinking_timeout=2.0)
         elif strategy_type == "neural":

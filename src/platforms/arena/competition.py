@@ -2,14 +2,10 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 from src.platforms.arena.game import GameEngine, Street, ActionType
 from src.platforms.arena.agent import ArenaAgent
-from src.strategies.strategies.balanced import BalancedStrategy
-from src.strategies.strategies.exploitative import ExploitativeStrategy
 from src.strategies.strategies.range import RangeStrategy
-from src.strategies.strategies.check_or_fold import CheckOrFoldStrategy
-from src.strategies.strategies.aggressive import AggressiveStrategy
 from src.utils.logger import arena_logger
 
 
@@ -22,21 +18,27 @@ def setup_arena_logging(log_file: str = "logs/arena.log"):
 
 class Competition:
     """对抗赛运行器：管理多场对局并统计结果"""
-    def __init__(self, strategy_names: List[str], initial_stack: int = 1000, 
-                 small_blind: int = 1, big_blind: int = 2):
+    def __init__(self, strategy_names: List[str], initial_stack: int = 1000,
+                 small_blind: int = 5, big_blind: int = 10,
+                 player_stacks: Optional[List[int]] = None):
         self.initial_stack = initial_stack
         self.sb = small_blind
         self.bb = big_blind
-        
-        # 1. 初始化玩家与策略
+
+        # 1. 初始化策略管理器
+        from src.strategies.strategy_manager import StrategyManager
+        self._strategy_mgr = StrategyManager(thinking_timeout=2.0)
+
+        # 2. 初始化玩家与策略
         players_info = []
         self.agents: List[ArenaAgent] = []
-        
+
         for i, sname in enumerate(strategy_names):
-            strategy = self._create_strategy(sname, 2.0)
+            strategy = self._create_strategy(sname)
             agent = ArenaAgent(seat_id=i, strategy=strategy)
             self.agents.append(agent)
-            players_info.append({'name': agent.name, 'stack': initial_stack})
+            stack = player_stacks[i] if player_stacks and i < len(player_stacks) else initial_stack
+            players_info.append({'name': agent.name, 'stack': stack})
             
         # 2. 初始化核心引擎
         self.engine = GameEngine(players_info, small_blind, big_blind)
@@ -51,44 +53,46 @@ class Competition:
                 'hands_played': 0,
                 'vpip_count': 0,
                 'pfr_count': 0,
-                'wins': 0
+                'wins': 0,
+                # 风格量化指标
+                'bet_count': 0,
+                'raise_count': 0,
+                'call_count': 0,
+                'three_bet_count': 0,
+                'three_bet_opps': 0,
+                'saw_flop_count': 0,
+                'saw_showdown_count': 0,
+                'won_at_showdown': 0,
+                'total_pot_won': 0,
             } for i, agent in enumerate(self.agents)
         }
         
-    def _create_strategy(self, strategy_type: str, timeout: float):
-        strategy_type = strategy_type.lower()
-        if strategy_type == "balanced" or strategy_type == "gto":
-            return BalancedStrategy(thinking_timeout=timeout)
-        elif strategy_type == "exploitative":
-            return ExploitativeStrategy(thinking_timeout=timeout)
-        elif strategy_type == "neural":
-            from src.strategies.strategies.neural import NeuralStrategy
-            return NeuralStrategy(thinking_timeout=timeout)
-        elif strategy_type == "checkorfold":
-            return CheckOrFoldStrategy()
-        elif strategy_type == "aggressive":
-            return AggressiveStrategy(thinking_timeout=timeout)
-        elif strategy_type == "icm":
-            from src.strategies.strategies.icm import ICMStrategy
-            return ICMStrategy(thinking_timeout=timeout)
-        else:
-            return RangeStrategy()
+    def _create_strategy(self, strategy_type: str):
+        """通过 StrategyManager 创建策略，失败时回退到 RangeStrategy"""
+        strategy = self._strategy_mgr.create_strategy(
+            table_id=f"arena_{strategy_type}",
+            strategy_type=strategy_type,
+        )
+        if strategy is not None:
+            return strategy
+        arena_logger.warning(f"未知策略 '{strategy_type}'，回退到 range")
+        return RangeStrategy()
 
-    def run(self, num_hands: int):
+    async def run(self, num_hands: int):
         """运行 N 手牌"""
         arena_logger.info(f"=== 竞技场对抗赛开始 (总计 {num_hands} 手) ===")
         start_time = time.time()
-        
+
         for h in range(num_hands):
             dealer_idx = h % len(self.agents)
-            self._run_single_hand(dealer_idx, h + 1)
-            
+            await self._run_single_hand(dealer_idx, h + 1)
+
         duration = time.time() - start_time
         self._print_summary(num_hands, duration)
 
-    def _run_single_hand(self, dealer_idx: int, hand_idx: int):
+    async def _run_single_hand(self, dealer_idx: int, hand_idx: int):
         # 0. 筹码管理策略
-        initial_bb_stack = 100 * self.bb
+        initial_bb_stack = self.initial_stack
         min_bb_stack = 10 * self.bb
         max_bb_stack = 400 * self.bb
 
@@ -119,28 +123,44 @@ class Competition:
         current_idx = self.engine.post_blinds()
         
         # 翻牌前环节 (Pre-flop)
-        self._betting_loop(current_idx)
-        
+        await self._betting_loop(current_idx)
+
         # 后续环节
+        saw_flop = False
         while self.engine.current_street < Street.RIVER and self._count_active() > 1:
             self.engine.next_street()
+            if not saw_flop and self.engine.current_street >= Street.FLOP:
+                saw_flop = True
+                for i, p in enumerate(self.engine.players):
+                    if p.is_active:
+                        self.stats[i]['saw_flop_count'] += 1
             first_actor = (self.engine.dealer_idx + 1) % len(self.agents)
-            self._betting_loop(first_actor)
+            await self._betting_loop(first_actor)
             
         # 结算前记录摊牌
-        if self._count_active() > 1:
+        is_showdown = self._count_active() > 1
+        if is_showdown:
             curr_street = self.engine.current_street
             street_name = curr_street.name if isinstance(curr_street, Street) else str(curr_street)
-            for p in self.engine.players:
+            for i, p in enumerate(self.engine.players):
                 if p.is_active:
+                    self.stats[i]['saw_showdown_count'] += 1
                     for agent in self.agents:
                         agent.observe_showdown(p.seat_id, p.hole_cards, street_name)
 
         # 结算
         winners = self.engine.get_winners()
+        winner_seats = set()
         for seat_id, amount in winners:
             self.engine.players[seat_id].stack += amount
             self.stats[seat_id]['wins'] += 1
+            self.stats[seat_id]['total_pot_won'] += amount
+            winner_seats.add(seat_id)
+
+        # 摊牌赢率追踪
+        if is_showdown:
+            for seat_id in winner_seats:
+                self.stats[seat_id]['won_at_showdown'] += 1
             
         # 每一手结束后，向所有 Agent 分发本手统计
         for i in range(len(self.agents)):
@@ -153,7 +173,7 @@ class Competition:
         for i, p in enumerate(self.engine.players):
             self.stats[i]['profit'] = (p.stack + self.stats[i]['locked_profit']) - (self.initial_stack + self.stats[i]['total_rebuys'])
 
-    def _betting_loop(self, start_idx: int):
+    async def _betting_loop(self, start_idx: int):
         """单回合投注循环"""
         num_players = len(self.agents)
         current_idx = start_idx
@@ -172,8 +192,12 @@ class Competition:
             
             if p.is_active and not p.is_all_in:
                 agent = self.agents[current_idx]
-                action, amount = agent.get_action(self.engine)
-                
+                action, amount = await agent.get_action(self.engine)
+
+                # 翻前 3-bet 机会追踪：面对加注（current_bet > BB）时有行动机会
+                if self.engine.current_street == Street.PREFLOP and self.engine.current_bet > self.bb:
+                    self.stats[current_idx]['three_bet_opps'] += 1
+
                 self._record_behavior_stats(current_idx, action)
                 
                 self.engine.execute_action(current_idx, action, amount)
@@ -201,25 +225,72 @@ class Competition:
         return sum(1 for p in self.engine.players if p.is_active and not p.is_all_in)
 
     def _record_behavior_stats(self, idx: int, action: ActionType):
+        # 全街追踪 bet/raise/call
+        # Arena ActionType 没有 BET，翻后 RAISE 等同于 bet
+        if action == ActionType.RAISE:
+            if self.engine.current_street == Street.PREFLOP:
+                self.stats[idx]['raise_count'] += 1
+            else:
+                self.stats[idx]['bet_count'] += 1
+        elif action == ActionType.CALL:
+            self.stats[idx]['call_count'] += 1
+
+        # 翻前专属统计
         if self.engine.current_street == Street.PREFLOP:
             if action in [ActionType.CALL, ActionType.RAISE, ActionType.ALL_IN]:
                 self.stats[idx]['vpip_count'] += 1
             if action in [ActionType.RAISE, ActionType.ALL_IN]:
                 self.stats[idx]['pfr_count'] += 1
+            # 3-bet 追踪：翻前已有加注(current_bet > BB)时再加注
+            if action in [ActionType.RAISE, ActionType.ALL_IN] and self.engine.current_bet > self.bb:
+                self.stats[idx]['three_bet_count'] += 1
 
     def _print_summary(self, num_hands: int, duration: float):
-        print("\n" + "="*60)
-        print(f"🃏 竞技场完赛报告 (对抗手数: {num_hands}, 耗时: {duration:.1f}s)")
-        print("-" * 60)
-        print(f"{'玩家 (策略)':<25} | {'盈亏':>8} | {'VPIP%':>6} | {'PFR%':>6} | {'胜场':>4}")
-        print("-" * 60)
-        
+        print("\n" + "="*100)
+        print(f"🃏 竞技场完赛报告 (对抗手数: {num_hands}, 耗时: {duration:.1f}s, 盲注: {self.sb}/{self.bb})")
+        print("-" * 100)
+        header = f"{'玩家':<18} | {'BB/100':>7} | {'AF':>5} | {'3B%':>5} | {'VPIP%':>6} | {'PFR%':>6} | {'WTSD%':>6} | {'W$SD%':>6} | {'AvgPot':>7} | {'胜场':>4}"
+        print(header)
+        print("-" * 100)
+
         for i in range(len(self.agents)):
             s = self.stats[i]
-            vpip = (s['vpip_count'] / s['hands_played'] * 100) if s['hands_played'] > 0 else 0
-            pfr = (s['pfr_count'] / s['hands_played'] * 100) if s['hands_played'] > 0 else 0
-            
-            rebuy_tag = f" (Rebuy: {s['total_rebuys']})" if s['total_rebuys'] > 0 else ""
-            lock_tag = f" (Locked: {s['locked_profit']})" if s['locked_profit'] > 0 else ""
-            print(f"{s['name']:<25} | {s['profit']:>8} | {vpip:>6.1f}% | {pfr:>6.1f}% | {s['wins']:>4}{rebuy_tag}{lock_tag}")
-        print("="*60 + "\n")
+            hp = s['hands_played'] or 1
+
+            # BB/100
+            bb_per_100 = (s['profit'] / self.bb) / hp * 100 if hp > 0 else 0
+
+            # AF = (bet + raise) / call
+            total_aggressive = s['bet_count'] + s['raise_count']
+            af = total_aggressive / s['call_count'] if s['call_count'] > 0 else float(total_aggressive)
+
+            # 3B%
+            three_bet_pct = (s['three_bet_count'] / s['three_bet_opps'] * 100) if s['three_bet_opps'] > 0 else 0
+
+            # VPIP / PFR
+            vpip = (s['vpip_count'] / hp * 100) if hp > 0 else 0
+            pfr = (s['pfr_count'] / hp * 100) if hp > 0 else 0
+
+            # WTSD% = saw_showdown / saw_flop
+            wtsd = (s['saw_showdown_count'] / s['saw_flop_count'] * 100) if s['saw_flop_count'] > 0 else 0
+
+            # W$SD% = won_at_showdown / saw_showdown
+            wsdp = (s['won_at_showdown'] / s['saw_showdown_count'] * 100) if s['saw_showdown_count'] > 0 else 0
+
+            # Avg Pot = total_pot_won / wins
+            avg_pot = (s['total_pot_won'] / s['wins']) if s['wins'] > 0 else 0
+
+            print(f"{s['name']:<18} | {bb_per_100:>+7.1f} | {af:>5.1f} | {three_bet_pct:>5.1f} | {vpip:>6.1f} | {pfr:>6.1f} | {wtsd:>6.1f} | {wsdp:>6.1f} | {avg_pot:>7.0f} | {s['wins']:>4}")
+
+        # 补充 Rebuy/Locked 信息
+        for i in range(len(self.agents)):
+            s = self.stats[i]
+            tags = []
+            if s['total_rebuys'] > 0:
+                tags.append(f"Rebuy: {s['total_rebuys']}")
+            if s['locked_profit'] > 0:
+                tags.append(f"Locked: {s['locked_profit']}")
+            if tags:
+                print(f"  {s['name']}: {', '.join(tags)}")
+
+        print("="*100 + "\n")

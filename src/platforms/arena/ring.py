@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from treys import Card
 
+from src.core.pilot_decider import PilotDecider
 from src.core.events import EventType, get_event_bus
 from src.core.messaging import AsyncChannel, Message, MessageType
 from src.platforms.arena.game import ActionType as ArenaActionType
@@ -33,6 +34,7 @@ from src.strategies.table_strategy import (
     TableState,
     TableStrategy,
 )
+from src.utils.cli_player import ActionChoice, PilotMode
 from src.utils.logger import arena_logger
 
 
@@ -46,7 +48,8 @@ class RingPlayerConfig:
     table_strategy: str = "default"      # 桌位策略名称
     initial_bank: int = 2000             # 初始银行余额
     buyin_amount: int = 200              # 买入金额
-    is_human: bool = False               # 是否为人类玩家
+    is_human: bool = False               # 是否为人类玩家（兼容旧代码）
+    pilot_mode: PilotMode = PilotMode.AUTO  # 人类参与程度
 
 
 @dataclass
@@ -148,13 +151,26 @@ class RingPlayer:
         hand_strategy: HandStrategy,
         channel: AsyncChannel,
         is_human: bool = False,
+        pilot_mode: PilotMode = PilotMode.AUTO,
     ):
         self.player_id = player_id
         self.name = name
         self.table_strategy = table_strategy
         self.hand_strategy = hand_strategy
         self.channel = channel
-        self.is_human = is_human
+        self.is_human = is_human or pilot_mode != PilotMode.AUTO
+
+        # PilotDecider：统一 AI/人类决策编排
+        self._pilot_decider: Optional[PilotDecider] = None
+        if pilot_mode != PilotMode.AUTO:
+            # RingPlayer 的 hand_strategy 是 HandStrategy（非 Strategy），
+            # PilotDecider 需要 Strategy，通过 StrategyHandAdapter 获取底层 strategy
+            underlying_strategy = getattr(hand_strategy, '_strategy', hand_strategy)
+            self._pilot_decider = PilotDecider(
+                strategy=underlying_strategy,
+                pilot_mode=pilot_mode,
+                table_strategy=table_strategy,
+            )
 
         # 运行时状态
         self.chips_on_table: int = 0
@@ -242,7 +258,22 @@ class RingPlayer:
         )
 
     async def _decide_hand_action(self, payload: Dict[str, Any]) -> Tuple[str, int]:
-        """手牌决策钩子 — AI 策略实现，人类玩家可重写"""
+        """手牌决策钩子 — 通过 PilotDecider 统一 AI/人类决策"""
+        # 如果有 PilotDecider（非 AUTO 模式），走统一决策流程
+        if self._pilot_decider:
+            choice: ActionChoice = await self._pilot_decider.decide_hand(
+                payload, prompt_prefix="ring",
+                context=f"stage={payload.get('current_stage', '?')} pot={payload.get('pot', 0)}",
+            )
+            action_str = choice.raw or choice.action.upper()
+            if choice.action == "allin" and not choice.raw:
+                action_str = "ALL_IN"
+            arena_logger.info(
+                f"[PILOT] 玩家 {self.name} 手牌决策: {action_str} {choice.amount} (来源={choice.source})"
+            )
+            return action_str, choice.amount
+
+        # AUTO 模式：纯 AI 策略决策
         game_state = self._restore_game_state(payload)
 
         if game_state is None:
@@ -278,7 +309,32 @@ class RingPlayer:
         )
 
     async def _decide_table_action(self, payload: Dict[str, Any]) -> TableAction:
-        """桌位决策钩子 — AI 策略实现，人类玩家可重写"""
+        """桌位决策钩子 — 通过 PilotDecider 统一 AI/人类决策"""
+        # 如果有 PilotDecider（非 AUTO 模式），走统一决策流程
+        if self._pilot_decider:
+            choice: ActionChoice = await self._pilot_decider.decide_table(
+                payload, prompt_prefix="ring", title="桌位状态",
+                context=f"chips={payload.get('my_chips', 0)} bank={payload.get('my_bank', 0)}",
+            )
+            arena_logger.info(
+                f"[PILOT] 玩家 {self.name} 桌位决策: {choice.action} {choice.amount} (来源={choice.source})"
+            )
+            # ActionChoice → TableAction
+            _TABLE_ACTION_MAP = {
+                "none": TableActionType.NONE,
+                "sit_in": TableActionType.SIT_IN,
+                "sit_out": TableActionType.SIT_OUT,
+                "leave": TableActionType.LEAVE,
+                "add_chips": TableActionType.ADD_CHIPS,
+            }
+            action_type = _TABLE_ACTION_MAP.get(choice.action, TableActionType.NONE)
+            return TableAction(
+                action_type=action_type,
+                amount=choice.amount if choice.action == "add_chips" else 0,
+                reasoning=f"PilotDecider {choice.source}: {choice.reasoning or choice.action}",
+            )
+
+        # AUTO 模式：纯 AI 策略决策
         table_state = TableState(
             my_chips=payload.get("my_chips", 0),
             my_bank=payload.get("my_bank", 0),
@@ -359,6 +415,7 @@ class RingPlayer:
             gs.current_stage = payload.get("current_stage", "preflop")
             gs.total_chips = payload.get("total_chips", 0)
             gs.my_initial_chips = payload.get("my_initial_chips", 0)
+            gs.big_blind = payload.get("big_blind", 2)
 
             # 恢复玩家信息
             players_data = payload.get("players", {})
@@ -474,6 +531,7 @@ class RingPlatform:
                 hand_strategy=hand_strategy,
                 channel=channel,
                 is_human=pc.is_human,
+                pilot_mode=pc.pilot_mode,
             )
             player.bank = pc.initial_bank
             self.players[player_id] = player
@@ -916,6 +974,7 @@ class RingPlatform:
             "current_stage": current_stage,
             "total_chips": p.stack + (player.bank if player else 0),
             "my_initial_chips": p.stack + p.bet_this_street,
+            "big_blind": self.table.bb,
             "players": players_data,
         }
 
@@ -1104,9 +1163,13 @@ class RingPlatform:
     @staticmethod
     def _create_strategy_instance(strategy_type: str):
         """创建 Strategy 实例"""
-        if strategy_type in ("balanced", "gto"):
+        strategy_type = strategy_type.lower()
+        if strategy_type == "balanced":
             from src.strategies.strategies.balanced import BalancedStrategy
             return BalancedStrategy(thinking_timeout=2.0)
+        elif strategy_type in ("gto", "gto_solver"):
+            from src.strategies.strategies.gto_solver import GtoSolverStrategy
+            return GtoSolverStrategy()
         elif strategy_type == "exploitative":
             from src.strategies.strategies.exploitative import ExploitativeStrategy
             return ExploitativeStrategy(thinking_timeout=2.0)

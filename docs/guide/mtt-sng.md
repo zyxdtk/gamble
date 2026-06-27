@@ -1,68 +1,50 @@
-# MTT/SNG 使用指南
+# MTT/SNG 锦标赛模式
 
-MTT（多桌锦标赛）和 SNG（Sit & Go 单桌赛）是锦标赛模式，与 Ring Game 和 Arena 对抗赛的关键区别：
+MTT（多桌锦标赛）和 SNG（Sit & Go 单桌赛）是锦标赛淘汰模式。
 
-| 特性 | Arena Competition | Ring Game | MTT | SNG |
-|------|-------------------|-----------|-----|-----|
+## 运行方式
+
+```bash
+# MTT
+uv run python -m src.main --platform arena --game mtt                  # AI 全自主
+uv run python -m src.main --platform arena --game mtt --pilot assist   # 人类辅助
+
+# SNG
+uv run python -m src.main --platform arena --game sng                  # AI 全自主
+uv run python -m src.main --platform arena --game sng --pilot assist   # 人类辅助
+```
+
+> 旧接口 `mtt`、`sng` 已废弃，但仍可用：
+> ```bash
+> uv run python -m src.main mtt            # → --platform arena --game mtt
+> uv run python -m src.main sng            # → --platform arena --game sng
+> uv run python -m src.main mtt --human    # → --pilot assist
+> ```
+
+## 模式对比
+
+| 特性 | Arena | Ring | MTT | SNG |
+|------|-------|------|-----|-----|
 | 桌数 | 单桌 | 单桌 | 多桌（自动平衡） | 单桌 |
 | 盲注 | 固定 | 固定 | 递增 | 递增 |
 | 淘汰制 | 否 | 否 | 是 | 是 |
 | 奖金分配 | 无 | 无 | 按名次 | 按名次 |
-| sit in/sit out | 无 | 支持 | 无 | 无 |
-| 用户参与 | 无 | 支持 CLI | 支持 CLI | 支持 CLI |
-
-## 快速开始
-
-### 纯 AI 对战
-
-```bash
-# MTT 18 人标准赛
-uv run python -m src.main mtt --mtt-entries 18
-
-# MTT 快速赛
-uv run python -m src.main mtt --mtt-entries 18 --mtt-blinds turbo
-
-# SNG 9 人赛
-uv run python -m src.main sng --sng-preset 9max
-
-# SNG 单挑赛
-uv run python -m src.main sng --sng-preset hu
-```
-
-### 带人类玩家
-
-```bash
-# MTT 带人类玩家
-uv run python -m src.main mtt --mtt-entries 9 --human
-
-# SNG 带人类玩家
-uv run python -m src.main sng --sng-preset 6max --human
-```
-
-第 1 个玩家为人类（你），其余为 AI。收到决策请求时会在终端显示牌面并等待输入。
-
-### 交互式配置
-
-```bash
-uv run python -m src.main
-# 选择 "3. MTT (多桌锦标赛)" 或 "4. SNG (Sit & Go 单桌赛)"
-```
 
 ## 盲注结构
 
-### MTT 盲注结构
+### MTT
 
 | 类型 | 说明 |
 |------|------|
-| `standard` | 标准盲注升级，每 10 手升一级 |
-| `turbo` | 快速升级，每 5 手升一级 |
-| `deepstack` | 深筹赛，起始筹码更多，升级更慢 |
+| `standard` | 每 10 手升一级 |
+| `turbo` | 每 5 手升一级 |
+| `deepstack` | 起始筹码更多，升级更慢 |
 
-### SNG 盲注结构
+### SNG
 
 | 类型 | 说明 |
 |------|------|
-| `standard` | 标准盲注升级 |
+| `standard` | 标准升级 |
 | `turbo` | 快速升级（默认） |
 
 ## SNG 预设类型
@@ -74,41 +56,7 @@ uv run python -m src.main
 | `9max` | 9 人 | 1-5 名 |
 | `10max` | 10 人 | 1-5 名 |
 
-## 人类玩家交互
-
-启用 `--human` 后，第 1 个玩家变为 CLI 交互模式。
-
-### 手牌决策
-
-收到手牌决策请求时，终端会显示：
-
-```
-┌─────── 你的回合 (座位 0) ───────┐
-│ 翻牌前  |  手牌: Ah Kd  |      │
-│ 公共牌: (空)  |  底池: 6  |    │
-│ 需跟注: 2                       │
-└─────────────────────────────────┘
-
-可用动作: FOLD | CALL | RAISE | ALL_IN
-```
-
-输入命令（`tourney>` 提示符）：
-
-| 命令 | 说明 |
-|------|------|
-| `fold` | 弃牌 |
-| `check` | 过牌 |
-| `call` | 跟注 |
-| `raise <金额>` | 加注至金额 |
-| `allin` | 全下 |
-| `status` | 重新显示当前状态 |
-| `help` | 显示帮助 |
-
-按回车使用推荐默认动作（check > call > fold）。
-
-## 运行报告
-
-比赛结束后输出 Rich 格式报告：
+## 运行报告示例
 
 ```
 ┌──────────────────────────────────────────────────────────────┐

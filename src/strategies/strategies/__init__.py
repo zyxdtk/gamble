@@ -3,6 +3,7 @@ from .balanced import BalancedStrategy
 from .exploitative import ExploitativeStrategy
 from .range import RangeStrategy
 from .aggressive import AggressiveStrategy
+from .gto_solver import GtoSolverStrategy
 
 __all__ = [
     'CheckOrFoldStrategy',
@@ -12,6 +13,7 @@ __all__ = [
     'NeuralStrategy',
     'AggressiveStrategy',
     'ICMStrategy',
+    'GtoSolverStrategy',
 ]
 
 

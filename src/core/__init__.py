@@ -5,26 +5,27 @@ Provides platform-agnostic interfaces and common types.
 
 from .interfaces import (
     GamePlatform,
-    PlayerAgent,
     GameAction,
     ActionType,
     GameState,
-    GameRunner,
+    Player,
 )
 from .events import GameEvent, EventType, EventBus, get_event_bus
-from .adapters import StrategyToAgentAdapter, create_strategy_agent
+from .pilot_decider import PilotDecider
+from .dispatch import SessionConfig, register_runner, get_runner
 
 __all__ = [
     "GamePlatform",
-    "PlayerAgent",
     "GameAction",
     "ActionType",
     "GameState",
-    "GameRunner",
+    "Player",
     "GameEvent",
     "EventType",
     "EventBus",
     "get_event_bus",
-    "StrategyToAgentAdapter",
-    "create_strategy_agent",
+    "PilotDecider",
+    "SessionConfig",
+    "register_runner",
+    "get_runner",
 ]

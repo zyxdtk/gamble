@@ -4,7 +4,7 @@ Browser 交互式 CLI — 从 main.py 中提取的浏览器手动控制模块。
 import asyncio
 import functools
 import os
-from typing import Optional
+from typing import Optional, Dict, Callable, Awaitable
 
 from src.platforms.browser.adapters import ReplayPokerAdapter, TableInfo, TableFilter
 from src.platforms.browser.browser_platform import (
@@ -13,6 +13,165 @@ from src.platforms.browser.browser_platform import (
     TableSelectionStrategy
 )
 from src.utils.logger import bot_logger
+
+
+# ─── 浏览器命令注册表（供 auto_player 等共享调用） ───
+
+async def cmd_login(platform: BrowserPlatform) -> None:
+    """确保已登录"""
+    from rich.console import Console
+    console = Console()
+    logged_in = await platform.ensure_logged_in()
+    console.print("登录: " + ("成功" if logged_in else "失败"))
+
+
+async def cmd_lobby(platform: BrowserPlatform) -> None:
+    """导航到大厅"""
+    from rich.console import Console
+    console = Console()
+    await platform.navigate_to_lobby()
+    console.print("已导航到大厅")
+
+
+async def cmd_tables(platform: BrowserPlatform, filter_stakes: Optional[str] = None) -> None:
+    """列出可用桌子"""
+    from rich.console import Console
+    console = Console()
+    filter_obj = TableFilter(
+        stakes=filter_stakes or platform.config.preferred_stakes,
+        min_players=platform.config.min_players,
+        max_players=platform.config.max_players
+    )
+    tables = await platform.adapter.get_available_tables(platform.lobby_page, filter_obj)
+    console.print(f"\n可用桌子 ({len(tables)}):")
+    if not tables:
+        console.print("  无")
+    else:
+        for i, table in enumerate(tables[:20]):
+            console.print(f"  {i+1}. {table.stakes or '?'} ({table.players}/{table.max_players})")
+
+
+async def cmd_best_table(platform: BrowserPlatform) -> None:
+    """显示最佳桌子"""
+    from rich.console import Console
+    console = Console()
+    best = await platform.select_best_table()
+    if not best:
+        console.print("无可用桌子")
+        return
+    console.print(f"最佳: {best.stakes or '?'} ({best.players}/{best.max_players})")
+
+
+async def cmd_open_table(platform: BrowserPlatform, target: Optional[str] = None) -> None:
+    """打开桌子"""
+    from rich.console import Console
+    console = Console()
+    if target is None or target == "best":
+        table_id = await platform.open_table()
+        if table_id:
+            console.print(f"已打开: {table_id}")
+    elif target.isdigit():
+        tables = await platform.get_available_tables()
+        idx = int(target) - 1
+        if 0 <= idx < len(tables):
+            await platform.open_table(table_info=tables[idx])
+            console.print(f"已打开桌子 {idx+1}")
+        else:
+            console.print(f"无效索引: {target}")
+    else:
+        await platform.open_table(table_url=target)
+        console.print(f"已打开: {target}")
+
+
+async def cmd_sit(platform: BrowserPlatform) -> None:
+    """尝试坐下"""
+    from rich.console import Console
+    console = Console()
+    success = await platform.try_sit_down()
+    console.print("坐下: " + ("成功" if success else "失败"))
+
+
+async def cmd_buyin(platform: BrowserPlatform, amount_str: str = "default") -> None:
+    """设置买入金额"""
+    from rich.console import Console
+    console = Console()
+    page = platform._get_table_page()
+    if not page:
+        console.print("无活跃桌子页面")
+        return
+    try:
+        if amount_str.lower() in ("default", "ok"):
+            success = await platform.adapter.confirm_buyin(page)
+        elif amount_str.lower() == "min":
+            success = await platform.adapter.select_min_buyin(page)
+            if success:
+                success = await platform.adapter.confirm_buyin(page)
+        elif amount_str.lower() == "max":
+            success = await platform.adapter.select_max_buyin(page)
+            if success:
+                success = await platform.adapter.confirm_buyin(page)
+        elif amount_str.isdigit():
+            success = await platform.adapter.set_buyin_amount(page, int(amount_str))
+            if success:
+                success = await platform.adapter.confirm_buyin(page)
+        else:
+            console.print(f"未知买入: {amount_str}")
+            return
+        console.print(f"买入: {'成功' if success else '失败'}")
+    except Exception as e:
+        console.print(f"买入异常: {e}")
+
+
+async def cmd_leave(platform: BrowserPlatform) -> None:
+    """离场"""
+    from rich.console import Console
+    console = Console()
+    await platform.leave_table()
+    console.print("已离场")
+
+
+async def cmd_screenshot(platform: BrowserPlatform, name: Optional[str] = None) -> None:
+    """截图"""
+    import time
+    from rich.console import Console
+    console = Console()
+    if name is None:
+        name = f"screenshot_{int(time.time())}.png"
+    page = platform._get_table_page()
+    if page:
+        path = f"./data/snapshots/{name}"
+        await page.screenshot(path=path)
+        console.print(f"截图已保存: {path}")
+    else:
+        console.print("无活跃页面")
+
+
+async def cmd_quick_snap(platform: BrowserPlatform) -> None:
+    """快速截图"""
+    import time
+    from rich.console import Console
+    console = Console()
+    name = f"snap_{int(time.time())}.png"
+    page = platform._get_table_page()
+    if page:
+        path = f"./data/snapshots/{name}"
+        await page.screenshot(path=path)
+        console.print(f"快速截图: {path}")
+
+
+# 浏览器命令注册表：命令名 → 异步函数
+BROWSER_COMMANDS: Dict[str, Callable[..., Awaitable]] = {
+    "login": cmd_login,
+    "lobby": cmd_lobby,
+    "tables": cmd_tables,
+    "best": cmd_best_table,
+    "open": cmd_open_table,
+    "sit": cmd_sit,
+    "buyin": cmd_buyin,
+    "leave": cmd_leave,
+    "screenshot": cmd_screenshot,
+    "snap": cmd_quick_snap,
+}
 
 
 class BrowserTestCLI:

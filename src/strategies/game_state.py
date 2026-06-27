@@ -1,6 +1,25 @@
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 
+
+@dataclass
+class TacticalContext:
+    """预计算战术上下文，由 Strategy 基类在 make_decision 入口填充"""
+    num_opponents: int = 0           # 活跃对手数
+    pot_odds: float = 0.0            # to_call / (pot + to_call)
+    spr: float = 20.0                # effective_stack / pot
+    equity: float = 0.0              # 蒙特卡洛胜率
+    hand_strength: Dict = field(default_factory=dict)
+    position_code: str = "ALL"
+    hand_str: str = "XX"
+    board_texture: Dict = field(default_factory=dict)
+    opponent_tags: Dict[str, str] = field(default_factory=dict)
+    fold_equity: float = 0.0
+    is_preflop: bool = True
+    street: str = "preflop"
+    avg_vpip: float = 0.3
+
+
 @dataclass
 class Player:
     seat_id: int
@@ -47,6 +66,8 @@ class GameState:
     total_chips: int = 0 # Current account balance (on-table + bank)
     hand_strength: Dict = field(default_factory=dict)
     current_stage: str = "preflop"  # [ADD] WebSocket 提供的游戏阶段: preflop, flop, turn, river
+    big_blind: int = 2              # 消除 hasattr(state, 'big_blind') 的 hack
+    tactical_context: Optional[TacticalContext] = None  # 预计算战术上下文
     
     @property
     def is_my_turn(self) -> bool:

@@ -5,6 +5,7 @@ Supports configuration, login, table selection strategies, and more.
 """
 import asyncio
 import os
+import time
 import yaml
 from enum import Enum
 from typing import Dict, Any, Optional, List, Callable, Set
@@ -16,6 +17,7 @@ from ...core.events import EventBus
 from .adapters import WebsiteAdapter, ReplayPokerAdapter, TableInfo, TableFilter
 from .websocket_listener import WebSocketListener
 from .state_manager import StateManager
+from .snapshot import save_anomaly_snapshot
 from ...utils.logger import bot_logger
 
 
@@ -184,6 +186,10 @@ class BrowserPlatform(GamePlatform):
         
         # 统计信息
         self._visited_tables: List[str] = []  # FIFO 访问历史
+
+        # 快照防抖：同一原因 60 秒内不重复保存
+        self._last_snapshot_time: Dict[str, float] = {}
+        self._snapshot_cooldown = 60.0
     
     async def initialize(self, **kwargs) -> None:
         """Initialize the browser platform."""
@@ -541,7 +547,7 @@ class BrowserPlatform(GamePlatform):
         # 使用双通道状态管理器
         await self._ensure_state_manager(page)
         merged_state = await self._state_manager.update_state()
-        
+
         from ...strategies.game_state import GameState as PokerGameState
         state = PokerGameState()
 
@@ -562,11 +568,13 @@ class BrowserPlatform(GamePlatform):
                 seat_id = int(seat_id_str)
             except (ValueError, TypeError):
                 continue
+            status = p_data.get("status", "active")
             player = Player(
                 seat_id=seat_id,
                 name=p_data.get("name", ""),
                 chips=p_data.get("chips", 0),
-                status=p_data.get("status", "active"),
+                status=status,
+                is_active=status not in ("folded", "sit_out"),
                 is_acting=p_data.get("is_acting", False),
                 bet=p_data.get("street_bet", 0),
             )
@@ -581,7 +589,13 @@ class BrowserPlatform(GamePlatform):
                 state.players[state.my_seat_id] = Player(seat_id=state.my_seat_id)
             state.players[state.my_seat_id].is_acting = True
             state.active_seat = state.my_seat_id
-        
+
+        # 日志：关键状态异常检测
+        if state.my_seat_id is None and merged_state.get("is_my_turn"):
+            bot_logger.warning("[状态异常] is_my_turn=True 但 my_seat_id=None")
+        if not state.players and merged_state.get("current_stage"):
+            bot_logger.warning("[状态异常] 有阶段信息但无玩家数据")
+
         return state
     
     async def get_available_actions(self, table_id: Optional[str] = None) -> Dict[str, Any]:
@@ -696,20 +710,45 @@ class BrowserPlatform(GamePlatform):
         """Execute a game action."""
         if not self._is_initialized:
             raise RuntimeError("Platform not initialized")
-        
+
         page = self._get_table_page(table_id)
         if not page:
             return False
-        
+
         action_name = action.action_type.value
         amount = getattr(action, "amount", None)
         preset = getattr(action, "bet_size_hint", None)
-        
+
+        # 日志：执行前
+        bot_logger.debug(
+            f"[执行动作] {action_name}"
+            f"{f' amount={amount}' if amount else ''}"
+            f"{f' preset={preset}' if preset else ''}"
+        )
+
         success = await self.adapter.execute_action(page, action_name, amount, preset)
-        
+
         if success:
-            bot_logger.info(f"Executed action: {action_name}")
-        
+            bot_logger.info(f"[动作完成] {action_name}{f' {amount}' if amount else ''}")
+        else:
+            bot_logger.warning(
+                f"[动作失败] {action_name}{f' {amount}' if amount else ''}"
+            )
+            # 执行失败时保存快照（带防抖，同一动作 60 秒内不重复）
+            snap_key = f"action_failed:{action_name}"
+            now = time.time()
+            if now - self._last_snapshot_time.get(snap_key, 0) >= self._snapshot_cooldown:
+                self._last_snapshot_time[snap_key] = now
+                await save_anomaly_snapshot(
+                    page, "action_failed",
+                    extra={
+                        "action": action_name,
+                        "amount": amount,
+                        "preset": preset,
+                    },
+                    table_id=table_id,
+                )
+
         return success
     
     async def start_game(self, **kwargs) -> bool:
@@ -762,7 +801,7 @@ class BrowserPlatform(GamePlatform):
             for btn_text in ["I'm back", "Sit in", "Resume"]:
                 btn = page.get_by_role("button", name=re.compile(btn_text, re.I)).first
                 if await btn.count() > 0 and await btn.is_visible():
-                    bot_logger.info(f"关闭覆盖层: {btn_text}")
+                    bot_logger.info(f"[弹窗] 关闭: {btn_text}")
                     await btn.click()
                     await asyncio.sleep(1)
 
@@ -770,7 +809,7 @@ class BrowserPlatform(GamePlatform):
             for selector in [".Modal__close", ".Button--dismiss"]:
                 close_btn = page.locator(selector).first
                 if await close_btn.count() > 0 and await close_btn.is_visible():
-                    bot_logger.info(f"关闭弹窗: {selector}")
+                    bot_logger.info(f"[弹窗] 关闭: {selector}")
                     await close_btn.click()
                     await asyncio.sleep(0.5)
         except Exception as e:
@@ -784,9 +823,16 @@ class BrowserPlatform(GamePlatform):
         if self._state_manager.ws_listener.is_healthy():
             return
 
-        bot_logger.warning("WS 连接不健康，尝试刷新页面重连...")
+        # 计算断线时长
+        import time
+        last_ws = self._state_manager.ws_listener._last_ws_time
+        downtime = int(time.time() - last_ws) if last_ws > 0 else -1
+
+        bot_logger.warning(f"[WS断线] 已断线 {downtime}s，尝试刷新页面重连...")
+
         page = self._get_table_page(table_id)
         if not page or page.is_closed():
+            bot_logger.warning("[WS断线] 页面不可用，无法重连")
             return
 
         try:
@@ -798,9 +844,15 @@ class BrowserPlatform(GamePlatform):
                 await self._state_manager.shutdown()
                 self._state_manager = StateManager(page)
                 await self._state_manager.initialize()
-                bot_logger.info("WS 重连成功")
+                bot_logger.info("[WS重连] 重连成功")
         except Exception as e:
-            bot_logger.error(f"WS 重连失败: {e}")
+            bot_logger.error(f"[WS重连] 重连失败: {e}")
+            # 重连失败保存快照
+            await save_anomaly_snapshot(
+                page, "ws_reconnect_failed",
+                extra={"error": str(e), "downtime": downtime},
+                table_id=table_id,
+            )
 
     async def _auto_sit_in(self, table_id: Optional[str] = None, buyin_amount=None):
         """检测买入弹窗，选择筹码量，点击确认
@@ -843,20 +895,41 @@ class BrowserPlatform(GamePlatform):
             # 确认买入
             confirmed = await self.adapter.confirm_buyin(page)
             if confirmed:
-                bot_logger.info("买入确认成功")
+                bot_logger.info("[买入] 确认成功")
                 await asyncio.sleep(2)
                 return True
             else:
-                bot_logger.warning("买入确认失败")
+                bot_logger.warning("[买入] 确认失败，尝试关闭弹窗避免卡住")
+                await self.adapter.cancel_buyin(page)
                 return False
         except Exception as e:
             bot_logger.error(f"自动入座异常: {e}")
             return False
 
     async def _check_and_sit_in(self, table_id: Optional[str] = None, buyin_amount=None):
-        """检测是否需要入座/买入，如果是则执行"""
+        """检测是否需要入座/买入，如果是则执行
+
+        已入座时直接返回 False，避免重复点击空座位或触发 Sit in 弹窗。
+        """
         page = self._get_table_page(table_id)
         if not page or page.is_closed():
+            return False
+
+        # 0. 快速判断是否已入座（避免已入座后反复点击空座位）
+        already_seated = False
+        if self._state_manager:
+            try:
+                ws_state = self._state_manager.ws_listener.get_state()
+                my_seat = ws_state.get("my_seat_id")
+                if my_seat is not None:
+                    players = ws_state.get("players", {})
+                    me = players.get(my_seat) or players.get(str(my_seat))
+                    if me and me.get("status") not in ("sit_out", "sitOut"):
+                        already_seated = True
+            except Exception:
+                pass
+
+        if already_seated:
             return False
 
         # 1. 检查买入弹窗
@@ -868,7 +941,7 @@ class BrowserPlatform(GamePlatform):
             import re
             seat_any = page.get_by_role("button", name=re.compile("Seat me anywhere", re.I)).first
             if await seat_any.count() > 0 and await seat_any.is_visible():
-                bot_logger.info("点击 'Seat Me Anywhere'")
+                bot_logger.info("[入座] 点击 'Seat Me Anywhere'")
                 await seat_any.click()
                 await asyncio.sleep(1)
                 # 点击后再检查买入弹窗
@@ -877,20 +950,21 @@ class BrowserPlatform(GamePlatform):
         except Exception:
             pass
 
-        # 3. 检查空座位
-        try:
-            empty_seat = page.locator(".Seat--empty, .Seat--open").first
-            if await empty_seat.count() > 0 and await empty_seat.is_visible():
-                bot_logger.info("点击空座位")
-                await empty_seat.click()
-                await asyncio.sleep(1)
-                if await self._auto_sit_in(table_id, buyin_amount):
-                    return True
-        except Exception:
-            pass
+        # 3. 检查空座位（仅未入座时）
+        if not already_seated:
+            try:
+                empty_seat = page.locator(".Seat--empty, .Seat--open").first
+                if await empty_seat.count() > 0 and await empty_seat.is_visible():
+                    bot_logger.info("[入座] 点击空座位")
+                    await empty_seat.click()
+                    await asyncio.sleep(1)
+                    if await self._auto_sit_in(table_id, buyin_amount):
+                        return True
+            except Exception:
+                pass
 
         # 4. 检查 Sit in 按钮（从 sit out 状态回来）
-        #    仅在玩家确实是 sit_out 状态时才尝试，避免每轮都打印 "Sit in button not found"
+        #    仅在玩家确实是 sit_out 状态时才尝试
         try:
             is_sitting_out = False
             if self._state_manager:
@@ -902,11 +976,14 @@ class BrowserPlatform(GamePlatform):
                     if me and me.get("status") == "sit_out":
                         is_sitting_out = True
             if is_sitting_out:
+                bot_logger.info("[入座] 从 sit_out 状态 sit in")
                 sit_in_result = await self.adapter.sit_in(page)
                 if sit_in_result:
                     return True
-        except Exception:
-            pass
+                else:
+                    bot_logger.warning("[入座] sit_in 调用失败")
+        except Exception as e:
+            bot_logger.debug(f"[入座] sit_in 检查异常: {e}")
 
         return False
 

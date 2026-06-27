@@ -2,7 +2,7 @@
 统一 CLI 玩家交互模块（replaypoker / ring / sng / mtt 共用）。
 
 设计目标：
-- 所有模式的 `--human` / `--cli` 入口在轮到你时，UI 保持一致
+- 所有模式的 `--pilot` 入口在轮到你时，UI 保持一致
 - 默认值由配置的策略生成（默认 GTO/balanced），按 Enter 即采纳
 - 共享 payload 渲染、命令解析、错误处理逻辑
 
@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -26,6 +27,65 @@ from src.strategies.strategy_manager import StrategyManager
 
 console = Console()
 cli_logger = logging.getLogger("cli_player")
+
+
+# ─── PilotMode 枚举 ───
+
+class PilotMode(enum.Enum):
+    """人类参与程度控制"""
+    AUTO = "auto"         # 无人：AI 全自主
+    MANAGED = "managed"   # 托管：AI 自主 + 人类可打断
+    ASSIST = "assist"     # 辅助：AI 建议 + 人类确认
+
+
+# ─── StdinMonitor 类 ───
+
+class StdinMonitor:
+    """托管/辅助模式的非阻塞 stdin 监控器"""
+
+    def __init__(self):
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._task: Optional[asyncio.Task] = None
+        self._paused = False          # 人类是否暂停了自动游戏
+        self._takeover = False        # 人类是否接管下一手决策
+
+    async def start(self):
+        """启动后台 stdin 读取循环"""
+        self._task = asyncio.create_task(self._read_loop())
+
+    async def _read_loop(self):
+        """持续从 stdin 读取行，放入队列"""
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                line = await loop.run_in_executor(None, input)
+                await self._queue.put(line.strip())
+            except (EOFError, KeyboardInterrupt):
+                break
+
+    async def get_command(self, timeout: float = 0.01) -> Optional[str]:
+        """非阻塞获取一条命令，超时返回 None"""
+        try:
+            return await asyncio.wait_for(self._queue.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+
+    async def stop(self):
+        """停止 stdin 监控"""
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
+
+    @property
+    def is_takeover(self) -> bool:
+        return self._takeover
 
 # Action 名称归一化：兼容各模式
 #   ring/sng/mtt: FOLD / CHECK / CALL / RAISE / ALL_IN

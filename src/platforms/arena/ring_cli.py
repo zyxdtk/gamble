@@ -1,13 +1,13 @@
 """
 Ring Game CLI 用户交互模块。
 
-`CLIRingPlayer` 通过 `create()` 方法将 `RingPlayer` 的决策钩子替换为终端输入，
-`RingPlayer.run()` 主循环、状态管理、通道通信等逻辑完全复用。
-
-轮到你时的 UI（统一）：与 sng/mtt/replaypoker 一致（见 `src.utils.cli_player`），
-默认值由 GTO 策略生成，按 Enter 即采纳。
+.. deprecated::
+    本模块已废弃，请使用 PilotDecider（src.core.pilot_decider）。
+    RingPlayerConfig 直接设置 pilot_mode=PilotMode.ASSIST 即可，
+    无需后续猴子补丁替换。
 """
 import logging
+import warnings
 from typing import Any, Dict, Tuple
 
 from src.platforms.arena.game import ActionType as ArenaActionType
@@ -16,6 +16,7 @@ from src.utils.cli_player import (
     ActionChoice,
     build_default,
     decide_hand_with_strategy,
+    prompt_hand_action,
     prompt_table_action,
 )
 
@@ -34,12 +35,19 @@ _TABLE_ACTION_MAP = {
 class CLIRingPlayer:
     """
     CLI 用户玩家。
-    通过 `create()` 方法将 `RingPlayer` 的决策钩子替换为终端输入。
+
+    .. deprecated::
+        请使用 RingPlayerConfig(pilot_mode=PilotMode.ASSIST) 替代。
     """
 
     @classmethod
     def create(cls, player: "RingPlayer") -> "RingPlayer":
         """从现有 RingPlayer 创建 CLIRingPlayer。"""
+        warnings.warn(
+            "CLIRingPlayer 已废弃，请使用 RingPlayerConfig(pilot_mode=PilotMode.ASSIST)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
         async def _cli_hand(payload):
             return await cls._cli_decide_hand_action(player, payload)

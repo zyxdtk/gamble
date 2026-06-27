@@ -1,42 +1,33 @@
-# Ring Game 使用指南
+# Ring Game 无限注现金桌
 
-Ring Game 是无限注现金桌（No-Limit Hold'em Cash Game）模拟，与 Arena 对抗赛的关键区别：
+Ring Game 是 No-Limit Hold'em Cash Game 模拟，与 Arena 的关键区别：
 
-| 特性 | Arena Competition | Ring Game |
-|------|-------------------|-----------|
+## 运行方式
+
+```bash
+# Arena Ring Game
+uv run python -m src.main --platform arena --game ring                  # AI 全自主
+uv run python -m src.main --platform arena --game ring --pilot assist   # 人类辅助
+
+# Browser Ring Game（ReplayPoker）
+uv run python -m src.main --platform browser --game ring                # AI 全自主
+uv run python -m src.main --platform browser --game ring --pilot assist # 人类辅助
+```
+
+> 旧接口 `ring`、`--human` 已废弃，但仍可用：
+> ```bash
+> uv run python -m src.main ring            # → --platform arena --game ring
+> uv run python -m src.main ring --human    # → --pilot assist
+> ```
+
+## 模式对比
+
+| 特性 | Arena | Ring Game |
+|------|-------|-----------|
 | 筹码管理 | 自动 rebuy/锁利 | 玩家自行决策（TableStrategy） |
 | sit in/sit out | 无 | 支持站起/坐入 |
 | 止盈止损 | 无 | 按 BB 阈值自动离场 |
-| 通信模式 | 同步函数调用 | 异步双工消息 |
 | 策略分离 | 无 | TableStrategy + HandStrategy |
-| 用户参与 | 无 | 支持 CLI 人类玩家 |
-
-## 快速开始
-
-### 纯 AI 对战
-
-```bash
-uv run python -m src.main ring --ring-hands 100
-```
-
-4 个 AI 玩家（GTO、Range、Exploitative、Aggressive）对战 100 手。
-
-### 带人类玩家
-
-```bash
-uv run python -m src.main ring --ring-hands 50 --human
-```
-
-第 1 个玩家为人类（你），其余为 AI。收到决策请求时会在终端显示牌面并等待输入。
-
-### 交互式配置
-
-```bash
-uv run python -m src.main
-# 选择 "5. Ring (无限注现金桌)"
-```
-
-可自定义：玩家数量、名称、手牌策略、桌位策略、初始银行、买入金额、盲注级别。
 
 ## 桌位策略
 
@@ -63,29 +54,9 @@ uv run python -m src.main
 - 不因筹码过厚 sit out
 - 更低的补筹阈值（20 BB）
 
-## 人类玩家交互
+## 人类玩家桌位交互
 
-启用 `--human` 后，第 1 个玩家变为 CLI 交互模式。
-
-### 手牌决策
-
-收到手牌决策请求时，终端会显示：
-
-```
-┌─────── 你的回合 (座位 0) ───────┐
-│ 翻牌前  |  手牌: Ah Kd  |      │
-│ 公共牌: (空)  |  底池: 6  |    │
-│ 需跟注: 2                       │
-└─────────────────────────────────┘
-
-可用动作: FOLD | CALL | RAISE | ALL_IN
-```
-
-输入命令：`fold` / `check` / `call` / `raise 100` / `allin`
-
-### 桌位决策
-
-每手牌开始前，终端会询问桌位决策：
+启用 `--pilot assist` 或 `--pilot managed` 后，每手牌开始前会询问桌位决策：
 
 ```
 ┌─────── 桌位状态 ───────┐
@@ -99,9 +70,7 @@ uv run python -m src.main
 
 输入命令：`none` / `sit_in` / `sit_out` / `add 500` / `leave`
 
-## 运行报告
-
-比赛结束后输出 Rich 格式报告：
+## 运行报告示例
 
 ```
 ┌──────────────────────────────────────────┐
@@ -116,5 +85,3 @@ uv run python -m src.main
 │ Bob    │ range │ default  │    196 │ 1800 │     -4 │  40.0 │  0.0 │    1 │
 └────────┴───────┴──────────┴────────┴──────┴────────┴───────┴──────┴──────┘
 ```
-
-报告包含：桌上筹码、银行余额、总盈亏、VPIP/PFR 统计、胜手数。

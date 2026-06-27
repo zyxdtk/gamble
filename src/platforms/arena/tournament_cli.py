@@ -1,13 +1,13 @@
 """
 MTT/SNG CLI 用户交互模块。
 
-`CLITournamentPlayer.create()` 将 `ArenaAgent.get_action` 替换为终端输入，
-保持 agent 的所有状态和逻辑不变。
-
-轮到你时的 UI（统一）：与 ring/replaypoker 一致（见 `src.utils.cli_player`），
-默认值由 GTO 策略生成，按 Enter 即采纳。
+.. deprecated::
+    本模块已废弃，请使用 PilotDecider（src.core.pilot_decider）。
+    ArenaAgent 构造时直接传入 pilot_mode=PilotMode.ASSIST 即可，
+    无需后续猴子补丁替换。
 """
 import logging
+import warnings
 from typing import Any, Dict, Tuple
 
 from src.platforms.arena.agent import ArenaAgent
@@ -34,12 +34,17 @@ class CLITournamentPlayer:
     """
     CLI 用户玩家（锦标赛模式）。
 
-    通过 `create()` 方法替换 `ArenaAgent.get_action` 为终端输入，
-    保持 agent 的 strategy、player_id、seat_id 等状态不变。
+    .. deprecated::
+        请使用 ArenaAgent(pilot_mode=PilotMode.ASSIST) 替代。
     """
 
     @classmethod
     def create(cls, agent: ArenaAgent) -> ArenaAgent:
+        warnings.warn(
+            "CLITournamentPlayer 已废弃，请使用 ArenaAgent(pilot_mode=PilotMode.ASSIST)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         async def _cli_get_action(arena_state):
             return await cls._cli_decide_hand_action(agent, arena_state)
 

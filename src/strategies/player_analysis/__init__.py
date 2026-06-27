@@ -1,4 +1,4 @@
-from .tags import PlayerTag, get_player_tag
+from .tags import PlayerTag, get_player_tag, get_provisional_tag, classify_by_action_signature
 from .database import PlayerDatabase
 from .manager import PlayerManager
 from .model import BaseRangeModel, ActionBasedRangeModel
@@ -11,6 +11,8 @@ RangeModel = ActionBasedRangeModel
 __all__ = [
     'PlayerTag',
     'get_player_tag',
+    'get_provisional_tag',
+    'classify_by_action_signature',
     'PlayerDatabase',
     'PlayerManager',
     'BaseRangeModel',

@@ -318,56 +318,66 @@ class ReplayPokerAdapter(WebsiteAdapter):
             return False
     
     async def select_min_buyin(self, page: Page) -> bool:
-        """Select minimum buy-in amount."""
+        """Select minimum buy-in amount.
+
+        即使 Min 按钮已 disabled（说明金额已是 min），
+        仍需激活金额输入框以启用 Submit 按钮。
+        """
         try:
             # 等待 buy-in 弹窗出现
             await asyncio.sleep(0.5)
 
+            clicked = False
+
             # 方法1: 通过类名查找 Min 按钮
             min_btn = page.locator(".BuyInModal__preset--min")
             if await min_btn.count() > 0 and await min_btn.is_visible():
-                # disabled 说明当前 amount 已经是 min，状态已满足，无需点击
                 if await min_btn.is_disabled():
-                    bot_logger.info("Min buy-in 按钮已 disabled（当前就是 min），跳过")
-                    return True
-                await min_btn.click()
-                await asyncio.sleep(0.3)
-                bot_logger.info("Selected minimum buy-in (by class)")
-                return True
+                    bot_logger.info("[买入] Min 按钮 disabled（金额已是 min）")
+                else:
+                    await min_btn.click()
+                    await asyncio.sleep(0.3)
+                    bot_logger.info("[买入] 已选择 Min buy-in (by class)")
+                    clicked = True
 
             # 方法2: 通过包含 "Min" 的按钮文本查找（限制在 buy-in 弹窗内）
-            buyin_modal = page.locator(".BuyInModal").first
-            if await buyin_modal.count() > 0:
-                min_text_btn = buyin_modal.get_by_text("Min", exact=False)
-                if await min_text_btn.count() > 0:
-                    for i in range(await min_text_btn.count()):
-                        btn = min_text_btn.nth(i)
-                        if await btn.is_visible():
-                            if await btn.is_disabled():
-                                bot_logger.info("Min buy-in 按钮已 disabled（当前就是 min），跳过")
-                                return True
-                            await btn.click()
-                            await asyncio.sleep(0.3)
-                            bot_logger.info("Selected minimum buy-in (by text)")
-                            return True
+            if not clicked:
+                buyin_modal = page.locator(".BuyInModal").first
+                if await buyin_modal.count() > 0:
+                    min_text_btn = buyin_modal.get_by_text("Min", exact=False)
+                    if await min_text_btn.count() > 0:
+                        for i in range(await min_text_btn.count()):
+                            btn = min_text_btn.nth(i)
+                            if await btn.is_visible():
+                                if await btn.is_disabled():
+                                    bot_logger.info("[买入] Min 文本按钮 disabled（金额已是 min）")
+                                    break
+                                await btn.click()
+                                await asyncio.sleep(0.3)
+                                bot_logger.info("[买入] 已选择 Min buy-in (by text)")
+                                clicked = True
+                                break
 
             # 方法3: 查找 BuyInModal 内的第一个按钮
-            preset_btns = page.locator(".BuyInModal .Button")
-            if await preset_btns.count() > 0:
-                first_btn = preset_btns.first
-                if await first_btn.is_visible():
-                    if await first_btn.is_disabled():
-                        bot_logger.info("First buy-in 按钮已 disabled，跳过")
-                        return True
-                    await first_btn.click()
-                    await asyncio.sleep(0.3)
-                    bot_logger.info("Selected first buy-in preset (fallback)")
-                    return True
+            if not clicked:
+                preset_btns = page.locator(".BuyInModal .Button")
+                if await preset_btns.count() > 0:
+                    first_btn = preset_btns.first
+                    if await first_btn.is_visible():
+                        if not await first_btn.is_disabled():
+                            await first_btn.click()
+                            await asyncio.sleep(0.3)
+                            bot_logger.info("[买入] 已选择第一个 preset (fallback)")
+                            clicked = True
 
-            bot_logger.warning("Min buy-in button not found")
-            return False
+            # 无论是否点击了 preset，都要激活金额输入框
+            # 这样即使 Min 已 disabled，输入框的交互也能触发 Submit 按钮启用
+            await self._activate_buyin_input(page)
+
+            return True  # 金额选择步骤完成（confirm_buyin 负责最终确认）
+
         except Exception as e:
-            bot_logger.error(f"Failed to select minimum buy-in: {e}")
+            bot_logger.error(f"[买入] 选择 Min 失败: {e}")
             return False
 
     async def select_max_buyin(self, page: Page) -> bool:
@@ -426,14 +436,70 @@ class ReplayPokerAdapter(WebsiteAdapter):
     async def confirm_buyin(self, page: Page) -> bool:
         """Confirm buy-in and sit down."""
         try:
+            # 等待一小段时间让 UI 更新
+            await asyncio.sleep(0.5)
+
+            # 先尝试激活 submit 按钮：聚焦金额输入框并触发 change 事件
+            # ReplayPoker 的 BuyInModal 在金额输入框获得焦点并触发 input 事件后才启用 submit
+            try:
+                amount_input = page.locator(
+                    ".BuyInModal input[type='number'], "
+                    ".BuyInModal input.NumberInput__input, "
+                    ".BuyInModal input[name*='amount'], "
+                    ".BuyInModal input[type='text']"
+                ).first
+                if await amount_input.count() > 0:
+                    # 聚焦 → 全选 → 重新输入当前值 → 按 Tab 离开，触发 change
+                    current_val = await amount_input.input_value()
+                    if current_val:
+                        await amount_input.click()
+                        await amount_input.fill("")
+                        await asyncio.sleep(0.1)
+                        await amount_input.fill(current_val)
+                        await asyncio.sleep(0.2)
+                        # 按 Tab 离开输入框，触发 onBlur 验证
+                        await amount_input.press("Tab")
+                        await asyncio.sleep(0.3)
+                        bot_logger.debug(f"[买入] 已激活金额输入框: {current_val}")
+            except Exception as e:
+                bot_logger.debug(f"[买入] 激活输入框失败（非致命）: {e}")
+
+            # 等待 submit 按钮变为 enabled（最多 3 秒）
+            submit_btn = page.locator(
+                ".BuyInModal__button--submit, .Button--submit"
+            ).first
+            try:
+                await submit_btn.wait_for(state="visible", timeout=3000)
+                # 再等它 enabled
+                for _ in range(6):
+                    if not await submit_btn.is_disabled():
+                        break
+                    await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
             # 优先通过类名查找（更精确）
             ok_btn = page.locator(".BuyInModal__button--submit, .Button--submit")
             if await ok_btn.count() > 0 and await ok_btn.is_visible():
-                await ok_btn.click()
-                await asyncio.sleep(1)
-                bot_logger.info("Confirmed buy-in with submit button")
-                return True
-            
+                is_disabled = await ok_btn.is_disabled()
+                if is_disabled:
+                    bot_logger.warning("[买入] Submit 按钮仍为 disabled，尝试 force click")
+                    try:
+                        await ok_btn.click(force=True, timeout=5000)
+                        await asyncio.sleep(1)
+                        bot_logger.info("[买入] Force click submit 成功")
+                        return True
+                    except Exception as e:
+                        bot_logger.warning(f"[买入] Force click 失败: {e}")
+                        # disabled 且 force 也失败，尝试 cancel 避免卡住
+                        await self.cancel_buyin(page)
+                        return False
+                else:
+                    await ok_btn.click(timeout=5000)
+                    await asyncio.sleep(1)
+                    bot_logger.info("[买入] 确认成功 (submit button)")
+                    return True
+
             # 备用：通过类名查找按钮组内的按钮
             modal_btn = page.locator(".BuyInModal__button")
             if await modal_btn.count() > 0 and await modal_btn.is_visible():
@@ -442,50 +508,95 @@ class ReplayPokerAdapter(WebsiteAdapter):
                 if len(buttons) >= 2:
                     await buttons[1].click()
                     await asyncio.sleep(1)
-                    bot_logger.info("Confirmed buy-in with second modal button")
+                    bot_logger.info("[买入] 确认成功 (second modal button)")
                     return True
-            
+
             # 最后尝试通过文字查找（使用 exact=True 避免匹配玩家名字）
             confirm_texts = ["Ok", "Confirm", "Sit Down", "Buy In", "Join Table"]
-            
+
             for text in confirm_texts:
                 btn = page.get_by_text(text, exact=True)
                 if await btn.count() > 0 and await btn.is_visible():
                     await btn.click()
                     await asyncio.sleep(1)
-                    bot_logger.info(f"Confirmed buy-in with '{text}' button")
+                    bot_logger.info(f"[买入] 确认成功 ('{text}')")
                     return True
-            
+
+            bot_logger.warning("[买入] 未找到确认按钮")
             return False
         except Exception as e:
-            bot_logger.error(f"Failed to confirm buy-in: {e}")
+            bot_logger.error(f"[买入] 确认异常: {e}")
             return False
     
     async def cancel_buyin(self, page: Page) -> bool:
         """Cancel the buy-in popup."""
         try:
+            # 先尝试 Cancel 文字按钮
             cancel_texts = ["Cancel", "Close", "X"]
-            
+
             for text in cancel_texts:
                 btn = page.get_by_text(text, exact=False)
                 if await btn.count() > 0 and await btn.is_visible():
                     await btn.click()
                     await asyncio.sleep(0.3)
-                    bot_logger.info(f"Cancelled buy-in with '{text}' button")
+                    bot_logger.info("[买入] 已关闭弹窗")
                     return True
-            
+
             # 尝试点击弹窗外部关闭
             close_btn = page.locator(".modal-close, [aria-label*='Close'], .close-icon")
             if await close_btn.count() > 0 and await close_btn.is_visible():
                 await close_btn.first.click()
                 await asyncio.sleep(0.3)
-                bot_logger.info("Cancelled buy-in with close button")
+                bot_logger.info("[买入] 已关闭弹窗 (close button)")
                 return True
-            
+
+            # 尝试按 Escape 关闭
+            try:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.3)
+                bot_logger.debug("[买入] 尝试 Escape 关闭弹窗")
+                return True
+            except Exception:
+                pass
+
             return False
         except Exception as e:
-            bot_logger.error(f"Failed to cancel buy-in: {e}")
+            bot_logger.error(f"[买入] 关闭弹窗失败: {e}")
             return False
+
+    async def _activate_buyin_input(self, page: Page):
+        """激活 BuyInModal 的金额输入框，触发 Submit 按钮启用。
+
+        ReplayPoker 的 BuyInModal 需要 input 事件触发后才启用 Submit 按钮，
+        即使金额已经正确（Min disabled），也需要交互一下输入框。
+        """
+        try:
+            input_selectors = [
+                ".BuyInModal input[type='number']",
+                ".BuyInModal input.NumberInput__input",
+                ".BuyInModal input[name*='amount']",
+                ".BuyInModal input[type='text']",
+                ".BuyInModal input",
+            ]
+            for selector in input_selectors:
+                inp = page.locator(selector).first
+                if await inp.count() > 0 and await inp.is_visible():
+                    current_val = await inp.input_value()
+                    if current_val:
+                        await inp.click()
+                        await inp.fill("")
+                        await asyncio.sleep(0.05)
+                        await inp.fill(current_val)
+                        await asyncio.sleep(0.1)
+                        await inp.press("Tab")
+                        bot_logger.debug(f"[买入] 输入框已激活 (值={current_val})")
+                    else:
+                        # 输入框为空，聚焦一下也行
+                        await inp.click()
+                        await asyncio.sleep(0.1)
+                    return
+        except Exception as e:
+            bot_logger.debug(f"[买入] 激活输入框失败（非致命）: {e}")
     
     async def get_game_state(self, page: Page) -> Dict[str, Any]:
         """Extract game state from ReplayPoker page (DOM only)."""
@@ -690,17 +801,14 @@ class ReplayPokerAdapter(WebsiteAdapter):
             for action_name, button_regex in targets.items():
                 btn = page.get_by_role("button", name=re.compile(button_regex, re.IGNORECASE))
                 try:
-                    if await btn.count(timeout=2000) > 0:
-                        first_btn = btn.first
+                    if await btn.count() == 0:
+                        continue
+                    first_btn = btn.first
 
-                        # [FIX] 多重可见性检查
-                        # 1. 检查是否 visible
-                        if not await first_btn.is_visible(timeout=2000):
-                            continue
-                except Exception:
-                    # 按钮查找超时，跳过
-                    continue
-                    
+                    # 1. 检查是否 visible
+                    if not await first_btn.is_visible():
+                        continue
+
                     # 2. 检查是否在 viewport 内（排除屏幕外的元素）
                     is_in_viewport = await first_btn.evaluate("""
                         (el) => {
@@ -715,7 +823,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     """)
                     if not is_in_viewport:
                         continue
-                    
+
                     # 3. 检查父元素是否隐藏（例如 .AwaitTurn 容器）
                     parent_class = await first_btn.evaluate("""
                         (el) => {
@@ -733,21 +841,24 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     if parent_class:
                         bot_logger.debug(f"Button '{action_name}' hidden by parent: {parent_class}")
                         continue
-                    
+
                     # 4. 检查按钮是否被禁用（灰色状态）
                     disabled = await first_btn.get_attribute("disabled")
-                    if disabled is not None:  # 有 disabled 属性
+                    if disabled is not None:
                         continue
-                    
+
                     # 5. 检查样式中的 opacity，如果太低说明是禁用状态
                     style = await first_btn.get_attribute("style") or ""
                     opacity_match = re.search(r'opacity:\s*([\d.]+)', style)
                     if opacity_match:
                         opacity = float(opacity_match.group(1))
-                        if opacity < 0.5:  # 透明度过低，视为禁用
+                        if opacity < 0.5:
                             continue
-                    
+
                     actions["available"].append(action_name)
+                except Exception:
+                    # 按钮查找/评估超时，跳过此按钮
+                    continue
             
             if "call" in actions["available"]:
                 try:
@@ -789,7 +900,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
             for preset_name, selector in preset_selectors.items():
                 try:
                     btn = page.locator(selector)
-                    if await btn.count(timeout=2000) > 0 and await btn.first.is_visible(timeout=2000):
+                    if await btn.count() > 0 and await btn.first.is_visible():
                         actions["presets"][preset_name] = True
                 except Exception:
                     pass
@@ -810,17 +921,17 @@ class ReplayPokerAdapter(WebsiteAdapter):
 
             if action_lower == "fold":
                 btn = page.get_by_role("button", name=re.compile("Fold", re.IGNORECASE)).first
-                if await btn.count() > 0 and await btn.is_visible(timeout=3000):
+                if await btn.count() > 0 and await btn.is_visible():
                     await human_delay("fold")
                     await btn.click()
                     return True
 
             elif action_lower in ["check", "call"]:
                 btn = page.get_by_role("button", name=re.compile("Check", re.IGNORECASE)).first
-                if not (await btn.count() > 0 and await btn.is_visible(timeout=3000)):
+                if not (await btn.count() > 0 and await btn.is_visible()):
                     btn = page.get_by_role("button", name=re.compile("Call", re.IGNORECASE)).first
 
-                if await btn.count() > 0 and await btn.is_visible(timeout=3000):
+                if await btn.count() > 0 and await btn.is_visible():
                     await human_delay("check" if action_lower == "check" else "call")
                     await btn.click()
                     return True
@@ -837,7 +948,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     selector = preset_selectors.get(preset)
                     if selector:
                         preset_btn = page.locator(selector).first
-                        if await preset_btn.count(timeout=3000) > 0 and await preset_btn.is_visible(timeout=3000):
+                        if await preset_btn.count() > 0 and await preset_btn.is_visible():
                             await preset_btn.click()
                             await asyncio.sleep(0.3)
                             bot_logger.info(f"Clicked preset button: {preset}")
@@ -850,7 +961,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     ]
                     for selector in input_selectors:
                         inp = page.locator(selector).first
-                        if await inp.count(timeout=3000) > 0 and await inp.is_visible(timeout=3000):
+                        if await inp.count() > 0 and await inp.is_visible():
                             await inp.click(click_count=3)
                             await inp.fill(str(amount))
                             await asyncio.sleep(0.3)
@@ -858,17 +969,17 @@ class ReplayPokerAdapter(WebsiteAdapter):
 
                 # 点击 Raise/Bet 按钮
                 btn = page.get_by_role("button", name=re.compile("Raise", re.IGNORECASE)).first
-                if not (await btn.count() > 0 and await btn.is_visible(timeout=3000)):
+                if not (await btn.count() > 0 and await btn.is_visible()):
                     btn = page.get_by_role("button", name=re.compile("Bet", re.IGNORECASE)).first
 
-                if await btn.count() > 0 and await btn.is_visible(timeout=3000):
+                if await btn.count() > 0 and await btn.is_visible():
                     await human_delay("raise")
                     await btn.click()
                     return True
 
             elif action_lower in ["all_in", "allin"]:
                 btn = page.get_by_role("button", name=re.compile("All In", re.IGNORECASE)).first
-                if await btn.count() > 0 and await btn.is_visible(timeout=3000):
+                if await btn.count() > 0 and await btn.is_visible():
                     await human_delay("all_in")
                     await btn.click()
                     return True
@@ -945,7 +1056,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
             clicked = False
             for selector in add_btn_selectors:
                 btn = page.locator(selector).first
-                if await btn.count() > 0 and await btn.is_visible(timeout=3000):
+                if await btn.count() > 0 and await btn.is_visible():
                     await btn.click()
                     await asyncio.sleep(1)
                     bot_logger.info("点击 'Add Chips' 按钮")
@@ -955,7 +1066,7 @@ class ReplayPokerAdapter(WebsiteAdapter):
             # 备用: 通过文字查找
             if not clicked:
                 add_btn_text = page.get_by_role("button", name=re.compile("Add Chips", re.IGNORECASE)).first
-                if await add_btn_text.count() > 0 and await add_btn_text.is_visible(timeout=3000):
+                if await add_btn_text.count() > 0 and await add_btn_text.is_visible():
                     await add_btn_text.click()
                     await asyncio.sleep(1)
                     bot_logger.info("点击 'Add Chips' 按钮 (by text)")
