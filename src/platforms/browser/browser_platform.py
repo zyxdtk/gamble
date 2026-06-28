@@ -21,6 +21,11 @@ from .snapshot import save_anomaly_snapshot
 from ...utils.logger import bot_logger
 
 
+# 不是"真正入座"的状态（含 sit_out + 候补名单）
+# "reserved" 是 ReplayPoker 候补名单状态：点了 Seat Me Anywhere 但桌满
+NOT_SEATED_STATUSES = frozenset({"sit_out", "sitOut", "reserved", "wait_list", "waitList", "queue"})
+
+
 class TableSelectionStrategy(Enum):
     """Strategy for selecting best available table."""
     MOST_PLAYERS = "most_players"  # 选择玩家最多的桌子
@@ -574,7 +579,7 @@ class BrowserPlatform(GamePlatform):
                 name=p_data.get("name", ""),
                 chips=p_data.get("chips", 0),
                 status=status,
-                is_active=status not in ("folded", "sit_out"),
+                is_active=status not in NOT_SEATED_STATUSES and status != "folded",
                 is_acting=p_data.get("is_acting", False),
                 bet=p_data.get("street_bet", 0),
             )
@@ -886,27 +891,63 @@ class BrowserPlatform(GamePlatform):
             return False
 
     async def _check_and_sit_in(self, table_id: Optional[str] = None, buyin_amount=None):
-        """检测是否需要入座/买入，如果是则执行
+        """检测是否需要入座/买入/补筹，如果是则执行
 
-        已入座时直接返回 False，避免重复点击空座位或触发 Sit in 弹窗。
+        优先级：
+        1. 已坐下但 sit_out 且 0 筹码 → 补筹 (不能 sit in 一个 0 筹码座位)
+        2. 已坐下且 sit_out → sit in
+        3. 未入座 → 尝试买入流程（BuyInModal / Seat Me Anywhere / 空座位 / Sit in 按钮）
         """
         page = self._get_table_page(table_id)
         if not page or page.is_closed():
             return False
 
-        # 0. 快速判断是否已入座（避免已入座后反复点击空座位）
+        # 0. 快速判断状态（避免已入座后反复点击空座位）
+        my_seat_id = None
+        my_status = None
+        my_chips = 0
         already_seated = False
         if self._state_manager:
             try:
                 ws_state = self._state_manager.ws_listener.get_state()
-                my_seat = ws_state.get("my_seat_id")
-                if my_seat is not None:
+                my_seat_id = ws_state.get("my_seat_id")
+                if my_seat_id is not None:
                     players = ws_state.get("players", {})
-                    me = players.get(my_seat) or players.get(str(my_seat))
-                    if me and me.get("status") not in ("sit_out", "sitOut"):
+                    me = players.get(my_seat_id) or players.get(str(my_seat_id))
+                    if me:
+                        my_status = me.get("status", "")
+                        my_chips = int(me.get("chips", 0) or 0)
+                    # 关键：reserved = 候补名单，不算入座
+                    if my_status and my_status not in NOT_SEATED_STATUSES:
                         already_seated = True
             except Exception:
                 pass
+
+        # ── 关键路径：已"占座"但非真入座（候补名单/排队）──
+        # 场景：点了 Seat Me Anywhere 后桌满，WS 把状态标为 "reserved"
+        # 这种情况下 _check_and_sit_in 不应再触发 sit in（桌满），
+        # 而应等待位 / 换桌，由 _decide_table_action / [等待入座] 流程处理
+        if (
+            my_seat_id is not None
+            and my_status in ("reserved", "wait_list", "waitList", "queue")
+        ):
+            await self._diagnose_wait_list(
+                page, table_id, my_seat_id, my_status, my_chips
+            )
+            # 不返回 False，让上层继续推进（外层会走"等待入座"超时换桌流程）
+            return False
+
+        # ── 关键路径：已坐下 + sit_out + 0 筹码（崩盘/换桌遗留）──
+        # 这种情况无法通过 sit in 恢复，必须先补筹。
+        if (
+            my_seat_id is not None
+            and my_status in ("sit_out", "sitOut")
+            and my_chips <= 0
+        ):
+            await self._diagnose_seated_sitout_no_chips(
+                page, table_id, my_seat_id, my_chips
+            )
+            return False  # 真正的补筹由 _decide_table_action 触发
 
         if already_seated:
             return False
@@ -996,6 +1037,190 @@ class BrowserPlatform(GamePlatform):
         """Subscribe to game events."""
         self._event_callback = callback
     
+    async def _diagnose_wait_list(
+        self,
+        page: Page,
+        table_id: Optional[str],
+        my_seat_id: Optional[int],
+        my_status: str,
+        my_chips: int,
+    ) -> None:
+        """诊断"候补名单 / 桌满"场景
+
+        场景：点了 Seat Me Anywhere 后桌满，WS 帧 seat.state = "reserved"
+        页面会显示类似 "You are in the wait list" / "Join wait list" 字样。
+        真正的处理是等待空位（外层 [等待入座] 流程会在 threshold 轮后换桌）。
+        这里只负责打日志 + 存 DOM 快照供 debug。
+        """
+        bot_logger.warning(
+            f"[诊断] 已在候补名单（非真入座） "
+            f"seat={my_seat_id}, status={my_status!r}, "
+            f"chips={my_chips}, table={table_id}"
+        )
+        try:
+            dom = await page.evaluate(
+                """
+                () => {
+                    const txt = (sel) => {
+                        const el = document.querySelector(sel);
+                        return el ? (el.textContent || '').trim() : null;
+                    };
+                    const cnt = (sel) => document.querySelectorAll(sel).length;
+                    const visible = (sel) => {
+                        const el = document.querySelector(sel);
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    };
+                    // 找页面上的 wait list 提示文字
+                    const allText = document.body.innerText || '';
+                    const waitListHints = [
+                        'wait list', 'waitlist', 'wait  list', '排队', '候补',
+                        'join the list', 'join wait list', 'join list',
+                        'table is full', '桌已满', 'full',
+                    ].filter(h => allText.toLowerCase().includes(h.toLowerCase()));
+                    return {
+                        url: location.href,
+                        seatMeAnywhereBtn: {
+                            count: cnt('.Lobby__seatMeAnywhere, [class*="seatMeAnywhere"]'),
+                            visible: visible('.Lobby__seatMeAnywhere'),
+                        },
+                        addChipsBtn: {
+                            count: cnt('.Header__button--addChips'),
+                            visible: visible('.Header__button--addChips'),
+                        },
+                        mySeatClass: (() => {
+                            const el = document.querySelector('.Seat--currentUser');
+                            return el ? el.className : null;
+                        })(),
+                        mySeatChips: txt('.Seat--currentUser .Seat__chipValue'),
+                        waitListHintsInPage: waitListHints,
+                        pageTextSample: allText.substring(0, 500),
+                    };
+                }
+                """
+            )
+            import json as _json
+            bot_logger.warning(
+                f"[诊断-候补名单] {table_id}\n"
+                f"{_json.dumps(dom, ensure_ascii=False, indent=2)}"
+            )
+        except Exception as e:
+            bot_logger.warning(f"[诊断] DOM 提取失败: {e}")
+
+        # 保存 DOM 快照
+        try:
+            await save_anomaly_snapshot(
+                page,
+                reason="wait_list_reserved",
+                extra={
+                    "table_id": table_id,
+                    "my_seat_id": my_seat_id,
+                    "my_status": my_status,
+                    "my_chips": my_chips,
+                },
+                table_id=table_id,
+            )
+            bot_logger.warning(f"[诊断] DOM 快照已保存至 data/snapshots/")
+        except Exception as e:
+            bot_logger.warning(f"[诊断] 快照保存失败: {e}")
+
+        bot_logger.warning(
+            "[诊断-建议] 桌满/候补名单，外层 [等待入座] 流程在 threshold 轮后会换桌，"
+            "无需在此处强行 sit in。"
+        )
+
+    async def _diagnose_seated_sitout_no_chips(
+        self,
+        page: Page,
+        table_id: Optional[str],
+        my_seat_id: Optional[int],
+        my_chips: int,
+    ) -> None:
+        """诊断"已坐下 + sit_out + 0 筹码"场景
+
+        目的：打日志 + 保存 DOM 快照，方便 debug 复盘。
+        真正的补筹动作由 DefaultTableStrategy.decide() 决策后由
+        AutoPlayer._decide_table_action() 调用 add_chips 完成。
+        """
+        bot_logger.warning(
+            f"[诊断] 已在桌上但 sit_out 且 0 筹码 "
+            f"(seat={my_seat_id}, chips={my_chips}, table={table_id})"
+        )
+        try:
+            # 1. 提取可见的关键按钮 / 筹码显示
+            dom = await page.evaluate(
+                """
+                () => {
+                    const txt = (sel) => {
+                        const el = document.querySelector(sel);
+                        return el ? (el.textContent || '').trim() : null;
+                    };
+                    const cnt = (sel) => document.querySelectorAll(sel).length;
+                    const visible = (sel) => {
+                        const el = document.querySelector(sel);
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    };
+                    const sitOutChecked = !!document.querySelector(
+                        '.Footer__settings--sittingOut .CheckBox.CheckBox--checked'
+                    );
+                    return {
+                        url: location.href,
+                        addChipsBtn: {
+                            count: cnt('.Header__button--addChips'),
+                            visible: visible('.Header__button--addChips'),
+                            text: txt('.Header__button--addChips'),
+                        },
+                        sitInBtn: {
+                            count: cnt('.SeatControls__action--sitIn'),
+                            visible: visible('.SeatControls__action--sitIn'),
+                        },
+                        mySeatChipsDisplay: txt(
+                            '.Seat--currentUser .Seat__chips, .Seat--currentUser .Seat__chipValue'
+                        ),
+                        sitOutCheckboxChecked: sitOutChecked,
+                        buyinModalOpen: cnt('.BuyInModal, .BuyinModal') > 0,
+                        currentUserSeatClass: (() => {
+                            const el = document.querySelector('.Seat--currentUser');
+                            return el ? el.className : null;
+                        })(),
+                        seatCount: cnt('.Seat'),
+                    };
+                }
+                """
+            )
+            import json as _json
+            bot_logger.warning(
+                f"[诊断-DOM状态] {table_id}\n{_json.dumps(dom, ensure_ascii=False, indent=2)}"
+            )
+        except Exception as e:
+            bot_logger.warning(f"[诊断] DOM 提取失败: {e}")
+
+        # 2. 保存 DOM 快照到 data/snapshots/，供后续分析
+        try:
+            await save_anomaly_snapshot(
+                page,
+                reason="seated_sitout_no_chips",
+                extra={
+                    "table_id": table_id,
+                    "my_seat_id": my_seat_id,
+                    "my_chips": my_chips,
+                },
+                table_id=table_id,
+            )
+            bot_logger.warning(f"[诊断] DOM 快照已保存至 data/snapshots/")
+        except Exception as e:
+            bot_logger.warning(f"[诊断] 快照保存失败: {e}")
+
+        # 3. 给出处理建议
+        bot_logger.warning(
+            "[诊断-建议] "
+            "DefaultTableStrategy 应返回 ADD_CHIPS，由 AutoPlayer 调用 add_chips。"
+            "如果未触发，请检查 _build_table_state_payload 是否正确传 chips/status。"
+        )
+
     async def wait_for_my_turn(self, timeout: float = 300.0) -> bool:
         """Wait until it's our turn to act. Returns False on timeout."""
         start_time = asyncio.get_event_loop().time()

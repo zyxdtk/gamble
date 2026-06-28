@@ -176,15 +176,25 @@ class TestWsEventDispatch:
         assert rec._current.community_cards_by_street.get("flop") == ["2h", "7d", "Ac"]
 
     def test_deal_community_cards_turn(self, tmp_store, ws_state_basic):
-        """dealCommunityCards 4张 → turn"""
+        """dealCommunityCards 在 flop 之后再发 1 张 → turn（累积 4 张）"""
         rec = HandRecorder(tmp_store, "table_1")
         rec.start_hand(1001, ws_state_basic)
 
+        # 先发 flop
         ws = dict(ws_state_basic)
-        ws["community_cards"] = ["2h", "7d", "Ac", "Ts"]
+        ws["community_cards"] = ["2h", "7d", "Ac"]
+        rec.on_ws_update("dealCommunityCards", {"cards": ["2h", "7d", "Ac"]}, ws)
+        assert rec._current.community_cards_by_street.get("flop") == ["2h", "7d", "Ac"]
+
+        # 再发 turn（只发新增 1 张）
+        ws = dict(ws_state_basic)
+        ws["community_cards"] = ["2h", "7d", "Ac", "Ts"]  # WS 可能全量给
         rec.on_ws_update("dealCommunityCards", {"cards": ["Ts"]}, ws)
 
         assert "turn" in rec._current.community_cards_by_street
+        # 累积公牌应为 4 张，且包含 flop 的 3 张 + turn 新增
+        assert rec._current.community_cards_by_street["turn"] == ["2h", "7d", "Ac", "Ts"]
+        assert rec._current.community_cards_final == ["2h", "7d", "Ac", "Ts"]
 
     def test_player_action_bet(self, tmp_store, ws_state_basic):
         """bet 动作记录到 actions"""
@@ -215,6 +225,42 @@ class TestWsEventDispatch:
         act = rec._current.actions[0]
         assert act.action == "raise"
         assert act.amount == 120
+
+    def test_player_action_raise_mislabeled_as_call(self, tmp_store, ws_state_basic):
+        """ReplayPoker 协议：raise 事件 action='call' 但带 raiseTo → 应识别为 raise"""
+        rec = HandRecorder(tmp_store, "table_1")
+        rec.start_hand(1001, ws_state_basic)
+
+        update = {"userId": "user_2", "seatId": 2, "raiseTo": 192}
+        rec.on_ws_update("call", update, ws_state_basic)
+
+        act = rec._current.actions[0]
+        assert act.action == "raise"
+        assert act.amount == 192
+
+    def test_player_action_bet_mislabeled_as_call(self, tmp_store, ws_state_basic):
+        """bet 事件 action='call' 但带 betAmount → 应识别为 bet"""
+        rec = HandRecorder(tmp_store, "table_1")
+        rec.start_hand(1001, ws_state_basic)
+
+        update = {"userId": "user_2", "seatId": 2, "betAmount": 50}
+        rec.on_ws_update("call", update, ws_state_basic)
+
+        act = rec._current.actions[0]
+        assert act.action == "bet"
+        assert act.amount == 50
+
+    def test_player_action_pure_call(self, tmp_store, ws_state_basic):
+        """纯 call：带 callAmount 字段"""
+        rec = HandRecorder(tmp_store, "table_1")
+        rec.start_hand(1001, ws_state_basic)
+
+        update = {"userId": "user_2", "seatId": 2, "callAmount": 30}
+        rec.on_ws_update("call", update, ws_state_basic)
+
+        act = rec._current.actions[0]
+        assert act.action == "call"
+        assert act.amount == 30
 
     def test_player_action_fold(self, tmp_store, ws_state_basic):
         """fold 动作"""

@@ -106,7 +106,7 @@ class DefaultTableStrategy(TableStrategy):
                 reasoning=f"止盈离场: 盈利 {state.profit_in_bb:.0f} BB",
             )
 
-        # 3. 短码补筹
+        # 3. 短码补筹（正在打且短码）
         if state.is_playing and state.chips_in_bb < state.low_chips_bb:
             add_amount = int(100 * state.current_bb - state.my_chips)
             if add_amount > 0:
@@ -123,7 +123,33 @@ class DefaultTableStrategy(TableStrategy):
                 reasoning=f"筹码过厚 sit out: {state.chips_in_bb:.0f} BB > {state.max_chips_bb} BB",
             )
 
-        # 5. sit out 状态且需要 sit in
+        # 4.5. 【关键修复】已坐下但 sit_out，且筹码不足 → 必须先补筹再 sit in
+        #     否则会出现"已在桌子上但 sit_out 状态、需要加筹码"的死循环：
+        #     - chips=0 时只点 sit_in 按钮无法真正入局
+        #     - WSListener 把 0 筹码的座位显示为 sit_out
+        #     - DefaultTableStrategy 之前只返回 SIT_IN，但 sit_in 不会加筹码
+        if state.is_seated and not state.is_playing and state.chips_in_bb < state.low_chips_bb:
+            target_chips = int(100 * state.current_bb)  # 补到 100 BB
+            if state.my_chips == 0:
+                # 0 筹码是常见崩盘场景：至少补到 low_chips_bb 以上才能继续
+                add_amount = int(state.low_chips_bb * state.current_bb)
+                target_desc = f"{state.low_chips_bb} BB"
+            else:
+                add_amount = max(0, target_chips - state.my_chips)
+                target_desc = "100 BB"
+            if add_amount > 0:
+                return TableAction(
+                    action_type=TableActionType.ADD_CHIPS,
+                    amount=add_amount,
+                    reasoning=(
+                        f"sit_out 且筹码不足 "
+                        f"(chips={state.my_chips} = {state.chips_in_bb:.1f} BB < "
+                        f"{state.low_chips_bb} BB 阈值)，"
+                        f"需要补筹到 {target_desc} 才能 sit in"
+                    ),
+                )
+
+        # 5. sit out 状态且筹码充足 → 直接 sit in
         if state.is_seated and not state.is_playing:
             return TableAction(
                 action_type=TableActionType.SIT_IN,

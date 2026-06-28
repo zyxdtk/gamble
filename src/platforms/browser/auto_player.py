@@ -292,7 +292,13 @@ class BrowserAutoPlayer:
                 # ── 卡住检测：未入座且无可用动作 ──
                 # 桌子满员/无法入座时，_check_and_sit_in 返回 False 且
                 # state.my_seat_id 为 None、actions 为空。连续多轮如此则换桌。
-                is_seated = state.my_seat_id is not None
+                # 注意：reserved (候补名单) 也不算入座，要换桌
+                my_player_for_stuck = state.players.get(state.my_seat_id) if state.my_seat_id is not None else None
+                my_status_for_stuck = my_player_for_stuck.status if my_player_for_stuck else None
+                is_seated = (
+                    state.my_seat_id is not None
+                    and my_status_for_stuck not in ("sit_out", "reserved", "wait_list", "waitList", "queue")
+                )
                 has_actions = bool(actions.get("available"))
 
                 if not is_seated and not has_actions:
@@ -302,10 +308,13 @@ class BrowserAutoPlayer:
                     else:
                         self._stuck_counter += 1
                         if self._stuck_counter % 10 == 1:
+                            extra = ""
+                            if my_status_for_stuck == "reserved":
+                                extra = "（候补名单中，等空位）"
                             bot_logger.info(
                                 f"[等待入座] 已等待 {self._stuck_counter} 轮 "
                                 f"(threshold={self._stuck_threshold}, "
-                                f"table={self._current_table_id})"
+                                f"table={self._current_table_id}){extra}"
                             )
                         if self._stuck_counter >= self._stuck_threshold:
                             bot_logger.warning(
@@ -416,8 +425,14 @@ class BrowserAutoPlayer:
 
         my_player = state.players.get(state.my_seat_id) if state.my_seat_id is not None else None
         my_chips = my_player.chips if my_player else 0
-        is_seated = state.my_seat_id is not None
-        is_playing = is_seated and my_player is not None and my_player.status != "sit_out"
+        my_status = my_player.status if my_player else None
+        # 关键：reserved = 候补名单，不算入座，等位/换桌由外层 [等待入座] 处理
+        NOT_SEATED_STATUSES = ("sit_out", "reserved", "wait_list", "waitList", "queue")
+        is_seated = (
+            state.my_seat_id is not None
+            and my_status not in NOT_SEATED_STATUSES
+        )
+        is_playing = is_seated and my_player is not None and my_status not in NOT_SEATED_STATUSES
 
         # 计算盈利
         total_profit = 0
@@ -461,6 +476,20 @@ class BrowserAutoPlayer:
         action_key = f"{choice.action}:{choice.amount}"
         if action_key == self._last_table_action:
             return False
+
+        # 关键场景诊断：sit_out + 0 筹码（必须在日志里能 grep 到）
+        if (
+            choice.action == "add_chips"
+            and state.my_seat_id is not None
+        ):
+            my_player = state.players.get(state.my_seat_id) if state.players else None
+            if my_player and my_player.status == "sit_out" and my_player.chips <= 0:
+                bot_logger.warning(
+                    f"[桌位诊断] 检测到 sit_out + 0 筹码 → 触发补筹: "
+                    f"seat={state.my_seat_id}, "
+                    f"amount={choice.amount}, "
+                    f"reasoning={choice.reasoning}"
+                )
 
         bot_logger.info(f"桌位决策: {choice.reasoning or choice.action}")
 

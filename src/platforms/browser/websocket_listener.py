@@ -446,6 +446,10 @@ class WebSocketListener:
                     p["status"] = "sit_out"
                 elif raw_status in ["fold", "folded"]:
                     p["status"] = "folded"
+                elif raw_status in ["reserved", "wait_list", "waitList", "queue"]:
+                    # 候补名单：已点 Seat Me Anywhere 但桌满，等空位
+                    # 必须独立成 status，不能归为 "active"，否则会被当成"已坐下"
+                    p["status"] = "reserved"
                 else:
                     p["status"] = "active"
             

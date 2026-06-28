@@ -258,6 +258,9 @@ class HandRecorder:
         self._table_id = table_id
         self._current: Optional[HandRecord] = None
         self._chips_start: int = 0
+        # 累积公牌：WSListener 会被 communityCards 全量替换，
+        # 所以手牌记录器自己维护一份按 dealCommunityCards 增量追加的真相
+        self._accumulated_community: List[str] = []
 
     # ── 属性 ──
 
@@ -289,6 +292,8 @@ class HandRecorder:
             table_id=self._table_id,
             timestamp=now,
         )
+        # 新一手牌：重置累积公牌
+        self._accumulated_community = []
 
         # 快照玩家初始筹码 + 我的身份
         my_seat = ws_state.get("my_seat_id")
@@ -361,23 +366,34 @@ class HandRecorder:
                 self._current.players[key]["cards"] = p.get("cards", [])
 
     def _on_deal_community_cards(self, update: Dict[str, Any], ws_state: Dict[str, Any]):
-        """记录公牌，按牌数判断街道"""
+        """记录公牌，按牌数判断街道
+
+        重要：WSListener 的 ws_state["community_cards"] 会被 communityCards 字段全量替换，
+        所以这里用 update["cards"]（本街道新增的牌）自己累积，存到 _accumulated_community。
+        """
         if self._current is None:
             return
-        cards = update.get("cards") or []
-        if not isinstance(cards, list) or not cards:
+        new_cards = update.get("cards") or []
+        if not isinstance(new_cards, list) or not new_cards:
             return
-        # 从 ws_state 取累积公牌（WSListener 已追加）
-        community = list(ws_state.get("community_cards") or [])
-        self._current.community_cards_final = community
+        # 增量追加；用 'in' 去重防止 WS 重复发同张牌
+        for c in new_cards:
+            if c and c not in self._accumulated_community:
+                self._accumulated_community.append(c)
+        community = self._accumulated_community
+        self._current.community_cards_final = list(community)
         n = len(community)
         street = {3: "flop", 4: "turn", 5: "river"}.get(n, "")
         if street:
-            # 记录该街道的公牌（flop=前3张, turn=前4张, river=前5张）
+            # 记录该街道累积到的公牌（flop=3, turn=4, river=5）
             self._current.community_cards_by_street[street] = list(community)
 
     def _on_player_action(self, action: str, update: Dict[str, Any], ws_state: Dict[str, Any]):
-        """记录玩家动作"""
+        """记录玩家动作
+
+        重要：ReplayPoker 协议下，raise 事件的 action 字段有时是 'call'，
+        必须用 update 中的金额字段（raiseTo / betAmount / callAmount）反推真实动作。
+        """
         if self._current is None:
             return
         user_id = str(update.get("userId", "") or "")
@@ -389,16 +405,8 @@ class HandRecorder:
         except (ValueError, TypeError):
             seat_id = None
 
-        # 金额字段优先级（与 WSListener 一致）
-        amount = (
-            update.get("amount")
-            or update.get("raiseTo")
-            or update.get("betAmount")
-            or update.get("callAmount")
-            or update.get("chips")
-            or 0
-        )
-        amount = int(amount) if isinstance(amount, (int, float)) else 0
+        # 根据 update 字段重新分类动作
+        real_action, amount = self._classify_action(action, update)
 
         # 玩家名
         name = ""
@@ -418,11 +426,41 @@ class HandRecorder:
             user_id=user_id,
             seat_id=seat_id,
             name=name,
-            action=action,
+            action=real_action,
             amount=amount,
             street=street,
             timestamp=now,
         ))
+
+    @staticmethod
+    def _classify_action(raw_action: str, update: Dict[str, Any]) -> tuple:
+        """根据 update 字段反推真实动作类型 + 提取金额
+
+        ReplayPoker 协议下 WS 帧的 action 字段不可信：
+        - 真正的 raise 经常被标成 'call'，但会带 raiseTo 字段
+        - 真正的 bet 经常被标成 'call'，但会带 betAmount 字段
+        - 真正的 call 带 callAmount 字段
+
+        Returns:
+            (action_str, amount_int)
+        """
+        # 优先级：raise > bet > call > fold
+        if update.get("raiseTo") is not None:
+            return "raise", int(update["raiseTo"])
+        if update.get("betAmount") is not None:
+            return "bet", int(update["betAmount"])
+        if update.get("callAmount") is not None:
+            return "call", int(update["callAmount"])
+        if update.get("chips") is not None and raw_action in ("all_in", "allin"):
+            return "all_in", int(update["chips"])
+
+        # fallback：用原始 action + amount 字段
+        amount = update.get("amount", 0)
+        try:
+            amount = int(amount) if amount is not None else 0
+        except (ValueError, TypeError):
+            amount = 0
+        return raw_action, amount
 
     def _on_award_pot(self, update: Dict[str, Any], ws_state: Dict[str, Any]):
         """记录底池颁奖"""
@@ -479,9 +517,16 @@ class HandRecorder:
         Args:
             choice: ActionChoice（含 equity/pot_odds/ev/confidence/strategy_name）
             street: 当前街道
+
+        街道推断：auto_player 传进来的 street 经常错（一直被标成 preflop），
+        这里以累积公牌数为准做兜底修正。
         """
         if self._current is None:
             return
+        # 街道兜底：基于累积公牌数推断
+        inferred_street = self._infer_street()
+        if inferred_street and (not street or street == "preflop"):
+            street = inferred_street
         now = datetime.now().isoformat(timespec="seconds")
         self._current.my_decisions.append(DecisionContext(
             street=street or "",
@@ -495,6 +540,11 @@ class HandRecorder:
             reasoning=getattr(choice, "reasoning", "") or "",
             timestamp=now,
         ))
+
+    def _infer_street(self) -> str:
+        """基于累积公牌数推断当前街道"""
+        n = len(self._accumulated_community)
+        return {0: "preflop", 3: "flop", 4: "turn", 5: "river"}.get(n, "")
 
     def finalize_hand(self, ws_state: Dict[str, Any]):
         """结束当前手牌，计算盈亏并持久化"""
@@ -544,6 +594,7 @@ class HandRecorder:
         finally:
             self._current = None
             self._chips_start = 0
+            self._accumulated_community = []
 
     def abort(self):
         """丢弃当前未完成记录（换桌时调用）"""
@@ -553,3 +604,4 @@ class HandRecorder:
             )
         self._current = None
         self._chips_start = 0
+        self._accumulated_community = []
