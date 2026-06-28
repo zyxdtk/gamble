@@ -17,6 +17,7 @@ class ExitChecker:
     - take_profit_bb: 赢了 N 个大盲注 -> 退出
     - low_chips_bb: 筹码低于 N 个大盲注 -> 退出
     - max_chips_bb: 筹码高于 N 个大盲注 -> 退出
+    - max_hands: 打完 N 手牌后自动退出（0=无限）
     """
 
     def __init__(
@@ -25,13 +26,14 @@ class ExitChecker:
         take_profit_bb: Optional[int] = None,
         low_chips_bb: Optional[int] = None,
         max_chips_bb: Optional[int] = None,
+        max_hands: Optional[int] = None,
     ):
         self.stop_loss_bb = stop_loss_bb
         self.take_profit_bb = take_profit_bb
         self.low_chips_bb = low_chips_bb
         self.max_chips_bb = max_chips_bb
+        self.max_hands = max_hands
 
-        # 未显式传入时，从配置文件读取
         if all(v is None for v in [stop_loss_bb, take_profit_bb, low_chips_bb, max_chips_bb]):
             self._load_from_config()
 
@@ -61,6 +63,7 @@ class ExitChecker:
         buy_in: int,
         big_blind: int,
         initial_chips: int,
+        hands_played: int = 0,
     ) -> Optional[str]:
         """
         检查是否应该退出牌桌
@@ -70,12 +73,18 @@ class ExitChecker:
             buy_in: 买入金额（用于计算盈亏基准）
             big_blind: 大盲注金额
             initial_chips: 初始筹码（首次入座时的筹码）
+            hands_played: 已打手牌数
 
         Returns:
             退出原因字符串，或 None 表示不退出
         """
         bb = big_blind if big_blind > 0 else 2
         profit = current_chips - initial_chips
+
+        # 手数限制：打完 N 手牌退出
+        if self.max_hands is not None and self.max_hands > 0:
+            if hands_played >= self.max_hands:
+                return f"max_hands: 已打 {hands_played} 手 (阈值 {self.max_hands})"
 
         # 止损：亏损超过 N 个 BB
         if self.stop_loss_bb is not None and self.stop_loss_bb > 0:

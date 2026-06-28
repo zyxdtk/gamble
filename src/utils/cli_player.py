@@ -587,7 +587,7 @@ def adapt_strategy_to_browser_action(
     if action == "check":
         if "check" in avail:
             return suggestion
-        # 策略想 free-check 但必须付钱 → 改 call（或 allin if 筹码不够）
+        # check 不在浏览器可用动作里 → 降级
         if "call" in avail:
             call_amt = min(to_call, chips)
             label = f"call ({call_amt})"
@@ -610,10 +610,18 @@ def adapt_strategy_to_browser_action(
                 f"[adapter] check→fold (avail={avail})",
                 source=suggestion.source or "adapter",
             )
-        lg.info(
-            f"[adapter] 策略推荐 check，但浏览器必须付钱 → {new_action} {new_amt}: "
-            f"street={street_dbg}, hole={hole_dbg}, to_call={to_call}, chips={chips}"
-        )
+        # 区分"免费 call"和"必须付钱"
+        if to_call == 0:
+            lg.info(
+                f"[adapter] 策略推荐 check 但浏览器无 check → 免费 call 0 "
+                f"(等效 check): street={street_dbg}, hole={hole_dbg}, "
+                f"avail={avail}, equity={suggestion.equity:.3f}"
+            )
+        else:
+            lg.info(
+                f"[adapter] 策略推荐 check 但浏览器必须付钱 → {new_action} {new_amt}: "
+                f"street={street_dbg}, hole={hole_dbg}, to_call={to_call}, chips={chips}"
+            )
         return ActionChoice(
             new_action, new_amt, label,
             f"[adapter] check→{new_action} ({new_amt}) | {suggestion.reasoning}",

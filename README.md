@@ -43,9 +43,9 @@ uv run python -m src.main --platform browser --game ring --pilot managed
 uv run python -m src.main --platform browser --game ring --pilot assist
 
 # Arena 策略对抗
-uv run python -m src.main --platform arena --game ring --arena-hands 100
-uv run python -m src.main --platform arena --game mtt --mtt-entries 18
-uv run python -m src.main --platform arena --game sng --sng-preset 9max
+uv run python -m src.main --platform arena --game ring --hands 100
+uv run python -m src.main --platform arena --game mtt --players 18
+uv run python -m src.main --platform arena --game sng --preset 9max
 
 # 旧别名（仍可用）
 uv run python -m src.main auto    # = --platform browser --game ring --pilot auto

@@ -905,10 +905,44 @@ class BrowserPlatform(GamePlatform):
         1. 已坐下但 sit_out 且 0 筹码 → 补筹 (不能 sit in 一个 0 筹码座位)
         2. 已坐下且 sit_out → sit in
         3. 未入座 → 尝试买入流程（BuyInModal / Seat Me Anywhere / 空座位 / Sit in 按钮）
+
+        Returns:
+            True: 执行了入座动作（sit in / buy in）
+            False: 未执行动作（已入座 / 等待状态）
+            "TABLE_FULL": 检测到桌满（有 "join waiting list" 按钮），应立即换桌
         """
         page = self._get_table_page(table_id)
         if not page or page.is_closed():
             return False
+
+        # ── 快速检测：桌满（join waiting list 按钮可见）──
+        # 用户要求：只要看到这个按钮就立即换桌，不用等 30 轮
+        try:
+            import re
+            wait_list_btn = page.get_by_role("button", name=re.compile("join.*waiting.*list|join.*wait.*list", re.I))
+            if await wait_list_btn.count() > 0 and await wait_list_btn.is_visible():
+                bot_logger.info("[入座] 检测到 'Join Waiting List' 按钮 → 桌满，立即换桌")
+                return "TABLE_FULL"
+        except Exception:
+            pass
+
+        # ── 快速检测：活跃玩家太少（只有我自己）──
+        # 用户要求：桌上只有一个活人时立即换桌，不用等
+        try:
+            if self._state_manager:
+                ws_state = self._state_manager.ws_listener.get_state()
+                players = ws_state.get("players", {})
+                active_count = 0
+                for sid, p in players.items():
+                    status = p.get("status", "")
+                    if status and status not in NOT_SEATED_STATUSES and status != "folded":
+                        active_count += 1
+                # 只有我自己（活跃玩家 <= 1）→ 换桌
+                if active_count <= 1:
+                    bot_logger.info(f"[入座] 活跃玩家只有 {active_count} 人 → 立即换桌")
+                    return "NOT_ENOUGH_PLAYERS"
+        except Exception:
+            pass
 
         # 0. 快速判断状态（避免已入座后反复点击空座位）
         my_seat_id = None

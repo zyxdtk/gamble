@@ -207,10 +207,10 @@ async def run_arena_competition(session: SessionConfig):
     gk = session.game_kwargs
     players = []
     strategies = list(AVAILABLE_STRATEGIES)
-    arena_players = gk.get("arena_players", len(strategies))
+    arena_players = gk.get("players", len(strategies))
 
     # 解析筹码配置
-    stack_config = gk.get("arena_stack")
+    stack_config = gk.get("stack")
     bb = 10  # 默认大盲
     stack_presets = {"short": 50, "medium": 100, "deep": 200}
 
@@ -242,11 +242,11 @@ async def run_arena_mtt(session: SessionConfig):
     from types import SimpleNamespace
     args = SimpleNamespace(
         pilot_mode=session.pilot,
-        mtt_entries=session.game_kwargs.get("mtt_entries", 18),
-        mtt_blinds=session.game_kwargs.get("mtt_blinds", "standard"),
-        mtt_stack=session.game_kwargs.get("mtt_stack", 1000),
-        mtt_fee=session.game_kwargs.get("mtt_fee", 100),
-        mtt_prize=session.game_kwargs.get("mtt_prize", None),
+        mtt_entries=session.game_kwargs.get("players", 18),
+        mtt_blinds=session.game_kwargs.get("blinds", "standard"),
+        mtt_stack=int(session.game_kwargs.get("stack", 1000) or 1000),
+        mtt_fee=session.game_kwargs.get("buyin", 100),
+        mtt_prize=session.game_kwargs.get("prize", None),
     )
     await run_mtt(args)
 
@@ -257,10 +257,10 @@ async def run_arena_sng(session: SessionConfig):
     from types import SimpleNamespace
     args = SimpleNamespace(
         pilot_mode=session.pilot,
-        sng_preset=session.game_kwargs.get("sng_preset", None),
-        sng_fee=session.game_kwargs.get("sng_fee", 50),
-        sng_stack=session.game_kwargs.get("sng_stack", 1500),
-        sng_blinds=session.game_kwargs.get("sng_blinds", "turbo"),
+        sng_preset=session.game_kwargs.get("preset", None),
+        sng_fee=session.game_kwargs.get("buyin", 50),
+        sng_stack=int(session.game_kwargs.get("stack", 1500) or 1500),
+        sng_blinds=session.game_kwargs.get("blinds", "turbo"),
     )
     await run_sng(args)
 
@@ -282,7 +282,7 @@ async def run_arena_ring(session: SessionConfig):
             hand_strategy="gto" if is_human else strategies[i % len(strategies)],
             table_strategy="default",
             initial_bank=2000,
-            buyin_amount=gk.get("ring_buyin", 200),
+            buyin_amount=gk.get("buyin", 200),
             is_human=is_human,
             pilot_mode=session.pilot if is_human else PilotMode.AUTO,
         ))
@@ -693,6 +693,7 @@ async def run_replaypoker(args):
         strategy_type=config.strategy_type,
         buyin_amount=buyin_amount,
         pilot_mode=pilot_mode,
+        max_hands=args.hands,
     )
     await auto_player.run()
 
@@ -753,22 +754,18 @@ def parse_args():
     parser.add_argument("--stakes", help="偏好盲注级别 (如 1/2, 5/10)")
     parser.add_argument("--strategy", help="策略类型 (扑克策略: tag/gto/range/exploitative/checkorfold/aggressive/neural, 或桌子选择: fifo/most/least/random)")
     parser.add_argument("--hands", type=int, default=100, help="游戏手数（所有模式通用）")
-    parser.add_argument("--arena-players", type=int, default=7, help="Arena 模式玩家数")
-    parser.add_argument("--arena-stack", type=str, default=None,
-                        help="筹码配置: short(50BB)/medium(100BB)/deep(200BB) 或逗号分隔每玩家BB数 (如 short,deep,medium)")
-    # MTT 参数
-    parser.add_argument("--mtt-entries", type=int, default=18, help="MTT 参赛人数")
-    parser.add_argument("--mtt-blinds", choices=["standard", "turbo", "deepstack"], default="standard", help="MTT 盲注结构")
-    parser.add_argument("--mtt-prize", type=str, default=None, help="MTT 奖金分配 (如 '50,30,20')")
-    parser.add_argument("--mtt-stack", type=int, default=1000, help="MTT 起始筹码")
-    parser.add_argument("--mtt-fee", type=int, default=100, help="MTT 买入费")
-    # SNG 参数
-    parser.add_argument("--sng-preset", choices=["hu", "6max", "9max", "10max"], default=None, help="SNG 类型")
-    parser.add_argument("--sng-blinds", choices=["standard", "turbo"], default="turbo", help="SNG 盲注结构")
-    parser.add_argument("--sng-stack", type=int, default=1500, help="SNG 起始筹码")
-    parser.add_argument("--sng-fee", type=int, default=50, help="SNG 买入费")
-    # Ring 参数
-    parser.add_argument("--ring-buyin", type=int, default=200, help="Ring Game 买入金额")
+    parser.add_argument("--buyin", default="min",
+                        help="买入量：min/max/default 或具体整数（所有模式通用，browser 默认 min，arena 默认按模式）")
+    parser.add_argument("--players", type=int, default=None,
+                        help="玩家/参赛人数（arena 默认 7，mtt 默认 18）")
+    parser.add_argument("--stack", type=str, default=None,
+                        help="起始筹码：short(50BB)/medium(100BB)/deep(200BB) 或整数（arena/mtt/sng）")
+    parser.add_argument("--blinds", choices=["standard", "turbo", "deepstack"], default=None,
+                        help="盲注结构（mtt 默认 standard，sng 默认 turbo）")
+    parser.add_argument("--preset", choices=["hu", "6max", "9max", "10max"], default=None,
+                        help="SNG 类型预设")
+    parser.add_argument("--prize", type=str, default=None,
+                        help="MTT 奖金分配（如 '50,30,20'）")
     # 参与度控制
     parser.add_argument(
         "--pilot",
@@ -781,8 +778,6 @@ def parse_args():
     parser.add_argument("--human", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--cli", action="store_true", help=argparse.SUPPRESS)
     # 其他参数
-    parser.add_argument("--buyin", default="min",
-                        help="ReplayPoker 买入量：min/max/default 或具体整数（默认 min）")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO", help="控制台日志级别 (默认: INFO)")
 
     args = parser.parse_args()
@@ -849,19 +844,12 @@ async def main():
             },
             game_kwargs={
                 "hands": args.hands,
-                "arena_players": args.arena_players,
-                "arena_stack": args.arena_stack,
-                "mtt_entries": args.mtt_entries,
-                "mtt_blinds": args.mtt_blinds,
-                "mtt_stack": args.mtt_stack,
-                "mtt_fee": args.mtt_fee,
-                "mtt_prize": args.mtt_prize,
-                "sng_preset": args.sng_preset,
-                "sng_blinds": args.sng_blinds,
-                "sng_stack": args.sng_stack,
-                "sng_fee": args.sng_fee,
-                "ring_buyin": args.ring_buyin,
                 "buyin": args.buyin,
+                "players": args.players,
+                "stack": args.stack,
+                "blinds": args.blinds,
+                "preset": args.preset,
+                "prize": args.prize,
             },
         )
         await runner(session_config)

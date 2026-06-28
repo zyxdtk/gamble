@@ -19,7 +19,7 @@ playwright install chrome
 uv run python -m src.main --platform browser --game ring --pilot auto      # 全自动 bot (ReplayPoker)
 uv run python -m src.main --platform browser --game ring --pilot managed   # 托管模式
 uv run python -m src.main --platform browser --game ring --pilot assist    # 辅助模式
-uv run python -m src.main --platform arena  --game ring --arena-hands 100  # Arena 仿真
+uv run python -m src.main --platform arena  --game ring --hands 100       # Arena 仿真
 
 # 旧别名 (仍可用，会打印废弃提示)
 uv run python -m src.main auto   # = --platform browser --game ring --pilot auto

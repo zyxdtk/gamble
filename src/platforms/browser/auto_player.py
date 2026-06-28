@@ -51,11 +51,13 @@ class BrowserAutoPlayer:
         strategy_type: str = "gto",
         buyin_amount: Optional[Union[int, str]] = None,
         pilot_mode: PilotMode = PilotMode.AUTO,
+        max_hands: int = 0,
     ):
         self.platform = platform
         self.strategy_type = strategy_type
         self.buyin_amount = buyin_amount
         self.pilot_mode = pilot_mode
+        self.max_hands = max_hands
 
         # 加载配置
         self._config = self._load_config()
@@ -68,6 +70,7 @@ class BrowserAutoPlayer:
             take_profit_bb=config_obj.take_profit_bb,
             low_chips_bb=config_obj.low_chips_bb,
             max_chips_bb=config_obj.max_chips_bb,
+            max_hands=max_hands,
         )
 
         # 策略管理器
@@ -260,6 +263,27 @@ class BrowserAutoPlayer:
                 sit_in_progress = await self.platform._check_and_sit_in(
                     self._current_table_id, self.buyin_amount
                 )
+
+                # ── 立即换桌：检测到桌满或活跃玩家太少 ──
+                # 用户要求：只要看到 Join Waiting List 按钮或只有我自己，就立即换桌
+                if sit_in_progress in ("TABLE_FULL", "NOT_ENOUGH_PLAYERS"):
+                    reason = "Join Waiting List 按钮" if sit_in_progress == "TABLE_FULL" else f"活跃玩家太少({sit_in_progress})"
+                    bot_logger.warning(f"[换桌] {reason}，立即换桌")
+                    switched = await self._switch_table()
+                    self._stuck_counter = 0
+                    if switched:
+                        self._consecutive_switches += 1
+                        if self._consecutive_switches >= self._max_consecutive_switches:
+                            bot_logger.warning(
+                                f"[换桌] 已连续换桌 {self._consecutive_switches} 次"
+                                f"仍无法入座，等待 60s 后重试"
+                            )
+                            await asyncio.sleep(60)
+                            self._consecutive_switches = 0
+                    else:
+                        bot_logger.warning("[换桌] 无可用桌子，等待 30s 后重试")
+                        await asyncio.sleep(30)
+                    continue
 
                 # 确保 WS 连接
                 await self.platform._ensure_ws_alive(self._current_table_id)
@@ -896,6 +920,7 @@ class BrowserAutoPlayer:
             buy_in=self.buyin_amount or self._initial_chips,
             big_blind=big_blind,
             initial_chips=self._initial_chips,
+            hands_played=self._hands_played,
         )
 
     async def _print_summary(self):
