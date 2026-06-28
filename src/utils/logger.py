@@ -17,7 +17,7 @@ MAX_BYTES = 10 * 1024 * 1024  # 10MB
 BACKUP_COUNT = 10              # 最多保留 10 个备份
 
 # 全局日志级别（仅影响控制台，文件始终记录全量）
-_log_level = logging.WARNING
+_log_level = logging.INFO
 
 # 是否已初始化根 logger
 _root_initialized = False

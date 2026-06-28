@@ -49,6 +49,10 @@ class WebSocketListener:
         # 当前街道每名下注额（seat_id -> total bet on this street）
         # 重置时机：startHand（新手牌）/ dealCommunityCards（新街道）
         self._street_bets: Dict[int, int] = {}
+
+        # 外部 update 回调钩子（供 HandRecorder 等模块订阅 WS 事件）
+        # 签名: callback(action, update, full_state)
+        self._update_callbacks: list = []
     
     async def start_listening(self):
         """启动 WebSocket 监听"""
@@ -63,6 +67,14 @@ class WebSocketListener:
         """停止 WebSocket 监听"""
         self._is_listening = False
         bot_logger.info("⏹️ WebSocket listener stopped")
+
+    def register_update_callback(self, callback):
+        """注册 WS update 回调。签名: callback(action, update, full_state)
+
+        回调在 _apply_update 处理完成后同步调用，full_state 反映更新后的状态。
+        回调内异常被吞掉（仅 debug 日志），不影响主流程。
+        """
+        self._update_callbacks.append(callback)
     
     def _on_websocket(self, ws):
         """注册 WebSocket 事件处理器"""
@@ -201,6 +213,17 @@ class WebSocketListener:
             pots = update.get("pots", [])
             self.state["pot"] = sum(p.get("chips", 0) for p in pots)
             if action == "awardPot":
+                # 颁奖日志：记录每个底池的赢家和金额（INFO 级别关键信息）
+                for p in pots:
+                    winners = p.get("winners") or p.get("winner") or []
+                    if isinstance(winners, dict):
+                        winners = list(winners.values())
+                    elif not isinstance(winners, list):
+                        winners = [winners] if winners else []
+                    chips = p.get("chips", 0)
+                    if winners:
+                        names = [w.get("name", w.get("userId", "?")) if isinstance(w, dict) else str(w) for w in winners]
+                        bot_logger.info(f"[WS-颁奖] {','.join(names)} 赢得 {chips}")
                 # 不在此处清空 community_cards，边池场景下会连续触发多次 awardPot，
                 # 之后的 dealCommunityCards 会追加到空列表。改由 startHand/resetTable 重置。
                 self.state["pot"] = 0
@@ -258,9 +281,8 @@ class WebSocketListener:
                 user_id is not None
                 and str(user_id) == str(self.state.get("my_user_id"))
             )
-            # 我的动作记 info，其他记 debug
-            log_fn = bot_logger.info if is_me else bot_logger.debug
-            log_fn(
+            # 所有玩家动作都记 info（INFO 级别需可见桌上关键动作）
+            bot_logger.info(
                 f"[WS-{action.upper()}] seat={seat_id} "
                 f"amount={amount} "
                 f"{'(我)' if is_me else ''} "
@@ -329,7 +351,15 @@ class WebSocketListener:
             min_raise = update.get("minimumRaise") or update.get("minRaise")
             if min_raise is not None:
                 self.state["min_raise"] = int(min_raise)
-    
+
+        # 通知外部回调（HandRecorder 等），在所有处理完成后同步调用
+        if self._update_callbacks:
+            for cb in self._update_callbacks:
+                try:
+                    cb(action, update, self.state.copy())
+                except Exception as e:
+                    bot_logger.debug(f"WS update callback error: {e}")
+
     async def _handle_deal_hole_cards(self, update: Dict):
         """处理发底牌消息，自动识别自己的座位"""
         cards_in_update = update.get("cards", [])

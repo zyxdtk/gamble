@@ -17,6 +17,7 @@ class Strategy(ABC):
     """
     strategy_name: str = "base"
     strategy_version: int = 1
+    strategy_aliases: list = []  # 注册别名（如 gto_solver 注册 "gto"）
 
     @property
     def full_name(self) -> str:
@@ -36,6 +37,8 @@ class Strategy(ABC):
         self._cached_board_texture: Dict = {}
         self._cached_fold_equity: float = 0.25
         self._last_street_cards_hash: int = 0
+        # Hero 的 user_id，用于区分自身动作和对手动作（更新感知范围）
+        self._hero_user_id: Optional[str] = None
 
     def _compute_tactical_context(self, state: GameState) -> None:
         """填充 state.tactical_context，供 make_decision 及其子方法使用。
@@ -52,6 +55,12 @@ class Strategy(ABC):
         tc.street = TacticalCalculator.calc_street(state)
         tc.position_code = get_position_code(state)
         tc.hand_str = normalize_hand_string(state.hole_cards) if state.hole_cards else "XX"
+
+        # 记录 Hero user_id，供 handle_event 区分自身/对手动作
+        if state.my_seat_id is not None and state.my_seat_id in state.players:
+            uid = state.players[state.my_seat_id].user_id
+            if uid:
+                self._hero_user_id = str(uid)
 
         # 对手标签：优先缓存
         tc.opponent_tags = self._cached_opponent_tags if self._cached_opponent_tags else TacticalCalculator.calc_opponent_tags(state)
@@ -75,20 +84,24 @@ class Strategy(ABC):
         策略子类可以在此执行预判定或更新内部状态缓存
         """
         if event_type == "action":
-            # 默认同步到选手管理器
-            self.player_mgr.update_opponent_range(
-                data.get("user_id"),
-                data.get("action"),
-                data.get("pot_ratio", 0.0)
-            )
+            user_id = data.get("user_id")
+            action = data.get("action", "")
+            pot_ratio = data.get("pot_ratio", 0.0)
+
+            # 区分 Hero 自身动作和对手动作
+            if user_id is not None and self._hero_user_id is not None and str(user_id) == self._hero_user_id:
+                # Hero 自己的动作 → 更新对手眼中的 Hero 感知范围
+                self.player_mgr.update_hero_perceived_range(action, pot_ratio)
+            else:
+                # 对手动作 → 更新对手范围模型
+                self.player_mgr.update_opponent_range(user_id, action, pot_ratio)
+
             # 更新对手标签缓存
-            user_id = data.get("user_id", "")
             if user_id:
                 self._cached_opponent_tags = TacticalCalculator.calc_opponent_tags_from_event(
                     self._cached_opponent_tags, user_id, data
                 )
             # 更新 fold equity 缓存
-            action = data.get("action", "")
             if action == "fold":
                 self._cached_fold_equity = min(0.60, self._cached_fold_equity + 0.05)
             elif action in ("raise", "call"):

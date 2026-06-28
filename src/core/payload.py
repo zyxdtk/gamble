@@ -52,6 +52,11 @@ def browser_state_to_payload(state, actions: dict) -> dict:
             "is_acting": getattr(p, "is_acting", False),
         }
 
+    # 我的桌上筹码：策略层用它钳制 raise 金额上限（防止超出自身筹码导致按钮置灰）
+    my_chips = 0
+    if my_seat is not None and my_seat in players:
+        my_chips = int(getattr(players[my_seat], "chips", 0) or 0)
+
     return {
         "my_seat_id": my_seat,
         "hole_cards": hole,
@@ -60,6 +65,7 @@ def browser_state_to_payload(state, actions: dict) -> dict:
         "to_call": to_call,
         "min_raise": min_raise,
         "max_raise": max_raise,
+        "my_chips": my_chips,
         "available_actions": norm_available,
         "current_stage": stage,
         "players": players_data,

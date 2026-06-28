@@ -58,6 +58,60 @@ Browser Platform 使用 WebSocket + DOM 双通道获取游戏状态：
 4. `disabled` 属性检测
 5. `opacity` 阈值检测 — 低于 0.5 视为不可见
 
+## Raise 按钮置灰检测
+
+执行 raise/bet 动作时，填入金额后额外检查 Raise 按钮的 `disabled` 属性和 `opacity`：
+
+- 若 `disabled` 存在或 `opacity < 0.5` → 打 `[Raise 按钮置灰]` WARNING 并 `return False`（不再静默成功）
+- 触发场景：raise 金额超出自身筹码、低于最小加注、面对超额 all-in 时仍尝试 raise
+
+## 卡住检测与自动换桌
+
+`BrowserAutoPlayer._game_loop` 中实现的健壮性机制：
+
+### 卡住检测
+
+每轮检查 `state.my_seat_id is None` 且 `actions` 为空 → `_stuck_counter++`。常见触发场景：桌子满员无空座、`_check_and_sit_in` 返回 False。
+
+- 每 10 轮打 `[等待入座]` 日志
+- 达到 `stuck_threshold`（默认 30 轮）→ 触发换桌
+
+### 换桌流程 (`_switch_table`)
+
+1. `leave_table` 离开旧桌（关闭页面）
+2. `remove_strategy` 清理旧策略实例
+3. 重置桌位级状态（初始筹码、手数追踪、街道日志）
+4. `open_table` 打开新桌（`select_best_table` 自动过滤已访问的）
+5. `create_strategy` + 重建 `PilotDecider`
+
+### 防无限换桌
+
+- 连续换桌 `max_table_switches` 次（默认 5）仍无法入座 → 等 60s 重试
+- 换桌失败（无可用桌子）→ 等 30s 重试
+- 成功入座后重置 `_consecutive_switches` 计数器
+
+### 配置 (`config/settings.yaml`)
+
+```yaml
+auto_mode:
+  stuck_threshold: 30        # 连续N轮无法入座触发换桌
+  max_table_switches: 5      # 最大连续换桌次数
+```
+
+## 筹码冲突诊断
+
+`_choice_to_game_action` 在决策后检测两种冲突情形并打 WARNING：
+
+- **情形 A**: `to_call >= my_chips` 但策略返回 RAISE（面对超额 all-in 不该 raise，规则上只能 call/fold）
+- **情形 B**: `amount > my_chips`（raise 金额本身超出自身筹码）
+
+这两种情形下 ReplayPoker 会把 Raise 按钮置灰，动作无法执行。日志示例：
+
+```
+WARNING [筹码冲突#3] 面对超额 all-in: to_call=5000 >= my_chips=2000, 但策略返回 RAISE amount=15000 ...
+WARNING [Raise 按钮置灰] amount=15000, disabled=True, opacity=0.30 ...
+```
+
 ## BrowserInterface 统一接口
 
 `src/platforms/browser/__init__.py` 提供 `BrowserInterface` 门面：

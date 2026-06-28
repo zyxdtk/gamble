@@ -79,6 +79,12 @@ class StrategyManager:
             # 裸名 key 始终指向最新版本
             self._strategy_registry[base_key] = strategy_class
 
+        # 注册别名（如 gto_solver 的 "gto" 别名）
+        for alias in getattr(strategy_class, 'strategy_aliases', []) or []:
+            alias_key = alias.lower().replace("-", "")
+            self._strategy_registry[alias_key] = strategy_class
+            self._strategy_registry[f"{alias_key}_v{version}"] = strategy_class
+
     def register_strategy(self, name: str, strategy_class: Type[Strategy]) -> None:
         self._register_strategy_class(name.lower(), strategy_class)
 

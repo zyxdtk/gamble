@@ -1,5 +1,6 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 import math
+import random
 from abc import ABC, abstractmethod
 
 class BaseRangeModel(ABC):
@@ -28,6 +29,58 @@ class BaseRangeModel(ABC):
 
     def get_active_combos_count(self) -> float:
         return sum(self.weights.values())
+
+    def sample_combo(self, exclude_cards: Optional[List[str]] = None) -> Optional[List[str]]:
+        """按权重采样一个起手牌组合，返回具体两张牌（排除已知牌）。
+
+        用于范围对抗 equity 计算：蒙特卡洛时用推断范围采样对手手牌，而非随机。
+        返回 None 表示无可用组合（调用方应回退到随机采样）。
+        """
+        exclude = set(exclude_cards or [])
+        valid_combos: List[tuple] = []
+        valid_weights: List[float] = []
+
+        for combo, weight in self.weights.items():
+            if weight <= 0:
+                continue
+            cards = self._combo_to_cards(combo, exclude)
+            if cards:
+                valid_combos.append((combo, cards))
+                valid_weights.append(weight)
+
+        if not valid_combos:
+            return None
+
+        idx = random.choices(range(len(valid_combos)), weights=valid_weights, k=1)[0]
+        return valid_combos[idx][1]
+
+    def _combo_to_cards(self, combo: str, exclude: set) -> Optional[List[str]]:
+        """将组合字符串（如 'AKs'）转为具体两张牌，排除已知牌。"""
+        suits = "shdc"
+        r1, r2 = combo[0], combo[1]
+
+        if len(combo) == 2:  # 对子
+            available = [s for s in suits if r1 + s not in exclude and r2 + s not in exclude]
+            if len(available) < 2:
+                return None
+            chosen = random.sample(available, 2)
+            return [r1 + chosen[0], r2 + chosen[1]]
+
+        suited = combo[2] == "s"
+        if suited:
+            for s in suits:
+                if r1 + s not in exclude and r2 + s not in exclude:
+                    return [r1 + s, r2 + s]
+            return None
+        else:
+            for s1 in suits:
+                for s2 in suits:
+                    if s1 == s2:
+                        continue
+                    c1, c2 = r1 + s1, r2 + s2
+                    if c1 not in exclude and c2 not in exclude:
+                        return [c1, c2]
+            return None
 
     def _get_static_rank(self, combo: str) -> float:
         """起手牌静态相对排名 (演示版)"""

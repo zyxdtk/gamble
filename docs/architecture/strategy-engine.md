@@ -23,7 +23,26 @@ GameState 输入
 └─────────────┘
 ```
 
-## 六种策略
+## 策略注册与别名
+
+`StrategyManager` 通过文件系统扫描注册策略：
+
+- **注册键** = 文件名去掉 `.py` 后小写并去下划线（如 `gto_solver.py` → `gtosolver`，`check_or_fold.py` → `checkorfold`）
+- **版本化键**：`{base}_v{version}`（如 `tag_v1`），裸名键始终指向最新版本
+- **别名机制**：策略类可通过 `strategy_aliases` 类属性注册别名（如 `GtoSolverStrategy.strategy_aliases = ["gto"]`）
+- **默认策略**：`tag`（配置在 `config/settings.yaml` 的 `strategy.type`，代码默认值在 `browser_platform.py` 和 `main.py`）
+
+当前已注册策略键：`tag` / `gto`(=gtosolver) / `balanced` / `range` / `exploitative` / `aggressive` / `checkorfold` / `neural` / `icm`，每个都有对应的 `_v1` 版本化键。
+
+## 九种策略
+
+### TAG 策略（默认）
+
+紧凶型（Tight-Aggressive），代码实现在 `src/strategies/strategies/tag.py`。配置和文档中用 `tag` 引用。
+
+- 翻前基于位置和手牌等级做 RFI / vs Open / 3bet 决策
+- 翻后基于 equity bucket 和 SPR 调整下注尺度
+- 介于 GTO 和 Exploitative 之间的平衡型打法
 
 ### Range 策略
 
@@ -40,7 +59,7 @@ GameState 输入
 
 ### GTO / Balanced 策略
 
-GTO 近似策略：
+GTO 近似策略（`gto_solver.py`，配置用 `gto` 或 `gtosolver`）：
 
 - 手牌分级：超强牌 / 强牌 / 中等牌 / 边缘牌 / 弱牌
 - 混合策略：`secondary_action` + `secondary_probability` 实现概率化决策
@@ -99,6 +118,8 @@ class ActionPlan:
 1. 安全检测：`to_call > limit_amount` → 退守
 2. 混合策略：按概率随机选择主/备动作
 3. 兜底：`CHECK` 但 `to_call > 0` → 退守
+
+> **注意**：当前 `get_action_for_bet` 不钳制 raise 金额到自身筹码。当对手 all-in 金额 ≥ 自身筹码时，策略可能返回超出筹码的 raise 金额，导致 ReplayPoker 把 Raise 按钮置灰。`auto_player._choice_to_game_action` 会在这种情形打 WARNING 日志（`[筹码冲突]`），但不会自动降级到 CALL/ALL_IN。后续可在 `ActionPlan` 层加 `min(amount, my_chips)` 钳制根治。
 
 ## 对手画像系统 (`src/strategies/player_analysis/`)
 

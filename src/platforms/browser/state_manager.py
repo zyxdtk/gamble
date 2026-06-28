@@ -154,6 +154,8 @@ class StateManager:
             state["community_cards_from_dom"] = community_cards
 
             # 提取我的座位ID（.Seat--currentUser + Position--N）
+            # 注意：Position--N 可能在某些布局下与 WS seatId 不一致（视觉位置 vs 逻辑座位），
+            # 合并层会以 WS 的 my_seat_id 为准，此处仅作 DOM 侧参考。
             my_seat_elem = self.page.locator(".Seat--currentUser").first
             if await my_seat_elem.count() > 0:
                 seat_class = await my_seat_elem.get_attribute("class") or ""
@@ -166,13 +168,20 @@ class StateManager:
             is_seated = await buyin_modal.count() == 0
             state["is_seated_from_dom"] = is_seated
 
-            # 判断是否轮到我（已入座 + CurrentPlayerSpotlight--active 在我的座位上）
-            if state["my_seat_id_from_dom"] is not None and is_seated:
-                active_spotlight = self.page.locator(
-                    f".CurrentPlayerSpotlight--active.Position--{state['my_seat_id_from_dom']}"
-                )
-                if await active_spotlight.count() > 0:
+            # 判断是否轮到我：直接检查 .Seat--currentUser 元素是否带有活跃标记。
+            # 不依赖 my_seat_id_from_dom（可能因 Position--N 与 WS seatId 不一致而错误）。
+            if is_seated and await my_seat_elem.count() > 0:
+                seat_class = await my_seat_elem.get_attribute("class") or ""
+                # ReplayPoker 在当前行动玩家的座位上添加 currentPlayer/active/turn 样式
+                if any(kw in seat_class for kw in ("currentPlayer", "is-active", "turn")):
                     state["is_my_turn_from_dom"] = True
+                else:
+                    # 回退：检查座位内或同级是否有 CurrentPlayerSpotlight--active
+                    active_spotlight = my_seat_elem.locator(
+                        ".CurrentPlayerSpotlight--active"
+                    )
+                    if await active_spotlight.count() > 0:
+                        state["is_my_turn_from_dom"] = True
 
             # 提取可用按钮（有超时保护，不再阻塞30秒）
             try:
@@ -394,8 +403,10 @@ class StateManager:
         if diffs != self._prev_diffs:
             self._prev_diffs = diffs
             if "seat" in diffs:
-                state_logger.warning(
-                    f"[SEAT-MISMATCH] WS seat={diffs['seat'][0]}, DOM seat={diffs['seat'][1]} — using WS"
+                # DOM 的 Position--N 可能是视觉位置而非逻辑座位号，与 WS seatId 不一致属正常。
+                # WS 通过 dealHoleCards 识别座位，可靠度 high，以此为准。
+                state_logger.debug(
+                    f"[SEAT-DIFF] WS seat={diffs['seat'][0]}, DOM Position={diffs['seat'][1]} — using WS"
                 )
             if "turn" in diffs:
                 state_logger.debug(

@@ -9,7 +9,7 @@ player:
   buyin_amount: 200     # 默认买入筹码数（单桌，单位：筹码）
 
 strategy:
-  type: "gto"  # options: gto, exploitative, checkorfold
+  type: "tag"  # options: tag, gto, exploitative, checkorfold, aggressive, range, neural, icm
   style: "TAG"  # Tight-Aggressive
   thinking_timeout: 20.0  # 思考时间限制（秒），超时则使用现有行动方案
   anti_ban:
@@ -35,3 +35,5 @@ game:
 auto_mode:
   limits:
     max_cycles: 10        # 单桌最大圈数限制
+  hand_history:
+    enabled: true         # 记录手牌历史到 data/hand_history/（JSONL + SQLite）

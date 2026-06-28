@@ -7,6 +7,7 @@
 - MANAGED: AI 自主运行 + 人类可通过 stdin 打断/接管
 - ASSIST: AI 建议动作 + 人类确认/覆盖
 """
+import asyncio
 import os
 import yaml
 from typing import Optional, Union
@@ -98,6 +99,21 @@ class BrowserAutoPlayer:
         self._last_logged_my_turn = False  # 上次记录的 is_my_turn
         self._action_count = 0            # 本手牌执行动作计数
 
+        # 动作失败退避：连续失败时指数退避，避免无意义重试刷屏
+        self._consecutive_action_failures = 0
+        self._max_action_failures = 5     # 超过此值后跳过本手等待下一手
+
+        # 卡住检测 / 换桌
+        self._stuck_counter = 0           # 连续"未入座且无动作"的轮数
+        self._stuck_threshold = int(self._config.get("stuck_threshold", 30))  # 触发换桌的阈值
+        self._consecutive_switches = 0    # 连续换桌次数（成功入座后重置）
+        self._max_consecutive_switches = int(self._config.get("max_table_switches", 5))
+
+        # 手牌历史记录器
+        hh_cfg = self._config.get("hand_history", {}) or {}
+        self._hand_history_enabled = bool(hh_cfg.get("enabled", False))
+        self._hand_recorder = None
+
     def _load_config(self) -> dict:
         """加载自动模式配置"""
         config_path = os.path.join(os.getcwd(), "config", "settings.yaml")
@@ -170,6 +186,21 @@ class BrowserAutoPlayer:
                 self._current_table_id, self.buyin_amount
             )
 
+            # 5b. 初始化手牌历史记录器
+            if self._hand_history_enabled:
+                from .hand_recorder import HandRecorder, HandHistoryStore
+                try:
+                    store = HandHistoryStore()
+                    self._hand_recorder = HandRecorder(store, self._current_table_id)
+                    if self.platform._state_manager and self.platform._state_manager.ws_listener:
+                        self.platform._state_manager.ws_listener.register_update_callback(
+                            self._hand_recorder.on_ws_update
+                        )
+                    bot_logger.info("手牌历史记录器已启动")
+                except Exception as e:
+                    bot_logger.warning(f"手牌历史记录器初始化失败: {e}")
+                    self._hand_recorder = None
+
             # 6. 启动 stdin 监控（managed/assist 模式）
             if self.pilot_mode in (PilotMode.MANAGED, PilotMode.ASSIST):
                 self._stdin_monitor = StdinMonitor()
@@ -189,6 +220,11 @@ class BrowserAutoPlayer:
             bot_logger.error(f"自动模式异常: {e}", exc_info=True)
         finally:
             self._running = False
+            if self._hand_recorder:
+                try:
+                    self._hand_recorder.finalize_hand({})
+                except Exception:
+                    pass
             if self._stdin_monitor:
                 await self._stdin_monitor.stop()
             await self._print_summary()
@@ -199,6 +235,12 @@ class BrowserAutoPlayer:
         while self._running:
             try:
                 self._loop_count += 1
+
+                # 0. 检查页面是否仍然可用（浏览器关闭时优雅退出）
+                page = self.platform._get_table_page(self._current_table_id)
+                if not page or page.is_closed():
+                    bot_logger.warning("[退出] 浏览器页面已关闭，退出游戏循环")
+                    break
 
                 # 1. 检查人类指令（managed/assist 模式）
                 if self._stdin_monitor:
@@ -215,7 +257,7 @@ class BrowserAutoPlayer:
                 await self.platform._dismiss_overlays(self._current_table_id)
 
                 # 确保已入座
-                await self.platform._check_and_sit_in(
+                sit_in_progress = await self.platform._check_and_sit_in(
                     self._current_table_id, self.buyin_amount
                 )
 
@@ -247,15 +289,90 @@ class BrowserAutoPlayer:
                 # --- 日志：状态变化时输出摘要 ---
                 self._log_state_change(state, actions)
 
+                # ── 卡住检测：未入座且无可用动作 ──
+                # 桌子满员/无法入座时，_check_and_sit_in 返回 False 且
+                # state.my_seat_id 为 None、actions 为空。连续多轮如此则换桌。
+                is_seated = state.my_seat_id is not None
+                has_actions = bool(actions.get("available"))
+
+                if not is_seated and not has_actions:
+                    if sit_in_progress:
+                        # 本轮有入座动作（点击了座位/弹窗），给时间让流程完成
+                        self._stuck_counter = 0
+                    else:
+                        self._stuck_counter += 1
+                        if self._stuck_counter % 10 == 1:
+                            bot_logger.info(
+                                f"[等待入座] 已等待 {self._stuck_counter} 轮 "
+                                f"(threshold={self._stuck_threshold}, "
+                                f"table={self._current_table_id})"
+                            )
+                        if self._stuck_counter >= self._stuck_threshold:
+                            bot_logger.warning(
+                                f"[卡住] 连续 {self._stuck_counter} 轮无法入座，"
+                                f"桌子可能已满，尝试换桌"
+                            )
+                            switched = await self._switch_table()
+                            self._stuck_counter = 0
+                            if switched:
+                                self._consecutive_switches += 1
+                                if self._consecutive_switches >= self._max_consecutive_switches:
+                                    bot_logger.warning(
+                                        f"[换桌] 已连续换桌 {self._consecutive_switches} 次"
+                                        f"仍无法入座，等待 60s 后重试"
+                                    )
+                                    await asyncio.sleep(60)
+                                    self._consecutive_switches = 0
+                            else:
+                                bot_logger.warning("[换桌] 无可用桌子，等待 30s 后重试")
+                                await asyncio.sleep(30)
+                            continue
+                else:
+                    if self._stuck_counter > 0:
+                        self._stuck_counter = 0
+                    if self._consecutive_switches > 0 and is_seated:
+                        bot_logger.info(
+                            f"[恢复] 已成功入座，重置换桌计数 "
+                            f"(was {self._consecutive_switches})"
+                        )
+                        self._consecutive_switches = 0
+
                 if actions.get("available"):
+                    # 连续失败退避：超过阈值后跳过本手，等待下一手重新开始
+                    if self._consecutive_action_failures >= self._max_action_failures:
+                        bot_logger.warning(
+                            f"[退避] 连续动作失败 {self._consecutive_action_failures} 次，"
+                            f"跳过本手等待下一手"
+                        )
+                        await asyncio.sleep(5)
+                        continue
+
                     # 2. 决策：通过 PilotDecider 统一编排
                     payload = browser_state_to_payload(state, actions)
                     choice = await self._pilot_decider.decide_hand(
                         payload, prompt_prefix="poker",
                     )
-                    game_action = self._choice_to_game_action(choice, actions)
+                    game_action = self._choice_to_game_action(choice, actions, state)
+                    if self._hand_recorder and self._hand_recorder.is_recording:
+                        try:
+                            street = state.current_stage or "preflop"
+                            self._hand_recorder.record_decision(choice, street)
+                        except Exception as e:
+                            bot_logger.debug(f"手牌记录 decision 异常: {e}")
                     success = await self.platform.execute_action(game_action, self._current_table_id)
-                    await human_delay("action")
+
+                    if success:
+                        self._consecutive_action_failures = 0
+                        await human_delay("action")
+                    else:
+                        self._consecutive_action_failures += 1
+                        # 指数退避：1s, 2s, 4s, 8s（上限 8s）
+                        backoff = min(8, 2 ** (self._consecutive_action_failures - 1))
+                        bot_logger.debug(
+                            f"[退避] 动作失败 {self._consecutive_action_failures} 次，"
+                            f"等待 {backoff}s 后重试"
+                        )
+                        await asyncio.sleep(backoff)
                 else:
                     # 不是我的回合，轮询间隔
                     await human_delay("poll")
@@ -267,13 +384,18 @@ class BrowserAutoPlayer:
                     break
 
             except Exception as e:
+                # 浏览器/页面关闭时优雅退出，不刷屏
+                err_msg = str(e)
+                if "has been closed" in err_msg or "Target page" in err_msg:
+                    bot_logger.warning(f"[退出] 浏览器或页面已关闭: {err_msg}")
+                    break
                 bot_logger.error(f"游戏循环异常 (loop#{self._loop_count}): {e}", exc_info=True)
                 # 异常快照
                 page = self.platform._get_table_page(self._current_table_id)
                 if page:
                     await save_anomaly_snapshot(
                         page, "game_loop_error",
-                        extra={"loop": self._loop_count, "error": str(e)},
+                        extra={"loop": self._loop_count, "error": err_msg},
                         table_id=self._current_table_id,
                     )
                 await human_delay("poll")
@@ -372,6 +494,97 @@ class BrowserAutoPlayer:
 
         return False
 
+    async def _switch_table(self) -> bool:
+        """离开当前桌子（已满/卡住），切换到新桌子
+
+        流程：
+        1. 离开旧桌子（关闭页面）
+        2. 移除旧策略
+        3. 重置桌位级状态（初始筹码、手数追踪等）
+        4. 打开新桌子（select_best_table 会过滤已访问的）
+        5. 创建新策略 + 重建 PilotDecider
+        """
+        old_table_id = self._current_table_id
+        bot_logger.info(f"[换桌] 离开桌子 {old_table_id}（连续无法入座）")
+
+        # 1. 离开旧桌子
+        if old_table_id:
+            try:
+                await self.platform.leave_table(old_table_id)
+            except Exception as e:
+                bot_logger.warning(f"[换桌] 离开旧桌子异常: {e}")
+
+        # 2. 移除旧策略
+        if old_table_id:
+            try:
+                self._strategy_mgr.remove_strategy(old_table_id)
+            except Exception:
+                pass
+
+        # 3. 重置桌位级状态
+        self._initial_chips = None
+        # 丢弃未完成的手牌记录（换桌中途无法知道结果）
+        if self._hand_recorder:
+            try:
+                self._hand_recorder.abort()
+            except Exception:
+                pass
+        self._last_hand_id = 0
+        self._last_logged_stage = ""
+        self._last_logged_my_turn = False
+        self._action_count = 0
+        self._consecutive_action_failures = 0
+
+        # 4. 打开新桌子
+        new_table_id = await self.platform.open_table()
+        if not new_table_id:
+            bot_logger.error("[换桌] 没有可用桌子")
+            self._current_table_id = None
+            return False
+
+        self._current_table_id = new_table_id
+
+        # 5. 创建新策略
+        self._strategy = self._strategy_mgr.create_strategy(
+            new_table_id, self.strategy_type
+        )
+        if not self._strategy:
+            bot_logger.warning(
+                f"[换桌] 策略 '{self.strategy_type}' 创建失败，使用 balanced"
+            )
+            self._strategy = self._strategy_mgr.create_strategy(
+                new_table_id, "balanced"
+            )
+
+        # 6. 重建 PilotDecider
+        if self._strategy:
+            self._pilot_decider = PilotDecider(
+                strategy=self._strategy,
+                pilot_mode=self.pilot_mode,
+                table_strategy=self._table_strategy,
+            )
+            bot_logger.info(
+                f"[换桌] 已切换到 {new_table_id}, "
+                f"策略={self._strategy.strategy_name}"
+            )
+            # 为新桌子重建手牌记录器
+            if self._hand_history_enabled:
+                from .hand_recorder import HandRecorder, HandHistoryStore
+                try:
+                    store = HandHistoryStore()
+                    self._hand_recorder = HandRecorder(store, new_table_id)
+                    if self.platform._state_manager and self.platform._state_manager.ws_listener:
+                        self.platform._state_manager.ws_listener.register_update_callback(
+                            self._hand_recorder.on_ws_update
+                        )
+                except Exception as e:
+                    bot_logger.warning(f"[换桌] 手牌记录器重建失败: {e}")
+                    self._hand_recorder = None
+            return True
+        else:
+            bot_logger.error("[换桌] 策略创建失败，无法继续")
+            return False
+
     def _build_table_state_payload(self, state: PokerGameState) -> dict:
         """从 PokerGameState 构建桌位状态 payload"""
         table_state = self._build_table_state(state)
@@ -391,7 +604,7 @@ class BrowserAutoPlayer:
             "max_chips_bb": table_state.max_chips_bb,
         }
 
-    def _choice_to_game_action(self, choice: ActionChoice, actions: dict) -> GameAction:
+    def _choice_to_game_action(self, choice: ActionChoice, actions: dict, state=None) -> GameAction:
         """将 ActionChoice 转换为 GameAction（浏览器平台）"""
         action = choice.action
         if action == "allin":
@@ -412,6 +625,37 @@ class BrowserAutoPlayer:
         else:
             action_type = ActionType.FOLD
             amount = 0
+
+        # ── 诊断：检测 raise 金额超出自身筹码的场景 ──
+        # 当对手 all-in 金额 > 我的筹码时，策略可能算出 to_call*3 / pot*0.75
+        # 等超出自身筹码的 raise 金额，导致 ReplayPoker 把 Raise 按钮置灰。
+        if state is not None and action_type in (ActionType.RAISE, ActionType.ALL_IN):
+            my_chips = 0
+            to_call = int(actions.get("to_call", 0) or 0)
+            my_seat = getattr(state, "my_seat_id", None)
+            players = getattr(state, "players", {}) or {}
+            if my_seat is not None and my_seat in players:
+                my_chips = int(getattr(players[my_seat], "chips", 0) or 0)
+
+            if my_chips > 0:
+                # 情形 A: 面对的全押金额已 >= 自身筹码 → 规则上只能 call/fold，不该 raise
+                if to_call >= my_chips and action_type == ActionType.RAISE:
+                    bot_logger.warning(
+                        f"[筹码冲突#{self._action_count}] 面对超额 all-in: "
+                        f"to_call={to_call} >= my_chips={my_chips}, "
+                        f"但策略返回 RAISE amount={amount} (source={choice.source}, "
+                        f"reasoning={choice.reasoning})。"
+                        f"此情形下 ReplayPoker 会将 Raise 按钮置灰，无法点击。"
+                    )
+                # 情形 B: raise 金额本身超出自身筹码
+                elif amount > my_chips:
+                    bot_logger.warning(
+                        f"[筹码冲突#{self._action_count}] raise 金额超出筹码: "
+                        f"amount={amount} > my_chips={my_chips}, "
+                        f"to_call={to_call}, pot={getattr(state, 'pot', 0)} "
+                        f"(source={choice.source}, reasoning={choice.reasoning})。"
+                        f"ReplayPoker 会拒绝此下注并把 Raise 按钮置灰。"
+                    )
 
         bot_logger.info(
             f"[决策#{self._action_count}] {action}"
@@ -547,8 +791,15 @@ class BrowserAutoPlayer:
         hand_id = ws_state.get("hand_id", 0)
         if hand_id != self._last_hand_id and hand_id > 0:
             if self._last_hand_id > 0:
+                # 结束上一手牌的记录
+                if self._hand_recorder and self._hand_recorder.is_recording:
+                    try:
+                        self._hand_recorder.finalize_hand(ws_state)
+                    except Exception as e:
+                        bot_logger.debug(f"手牌记录 finalize 异常: {e}")
                 self._hands_played += 1
                 self._action_count = 0  # 重置动作计数
+                self._consecutive_action_failures = 0  # 新手牌重置失败计数
 
                 # 输出 VPIP/PFR 统计
                 vpip_tracker = ws_state.get("vpip_tracker", {})
@@ -580,6 +831,13 @@ class BrowserAutoPlayer:
 
             self._last_hand_id = hand_id
             self._last_logged_stage = ""  # 重置街道追踪
+
+            # 开始新一手牌的记录
+            if self._hand_recorder:
+                try:
+                    self._hand_recorder.start_hand(hand_id, ws_state)
+                except Exception as e:
+                    bot_logger.debug(f"手牌记录 start 异常: {e}")
 
     def _check_exit(self, state: PokerGameState) -> Optional[str]:
         """检查退出条件"""

@@ -141,6 +141,7 @@ class GtoSolverStrategy(Strategy):
     """
 
     strategy_name = "gto_solver"
+    strategy_aliases = ["gto"]  # 配置/文档里用的 "gto" 别名
 
     def __init__(self, thinking_timeout: float = 2.0):
         super().__init__(thinking_timeout)

@@ -112,8 +112,8 @@ ARG_TARGET_VAL=$4
 # 默认配置
 MODE_FLAG="--mode auto"
 MODE_NAME="🤖 自动模式 (Auto)"
-STRATEGY_FLAG="range"
-STRATEGY_NAME="📊 Range 策略"
+STRATEGY_FLAG="tag"
+STRATEGY_NAME="🏆 TAG 策略"
 TASK_FLAG="--profit 2000"
 TASK_NAME="💰 盈利目标: 2000"
 HEADLESS_FLAG=""
@@ -152,6 +152,7 @@ fi
 
 if [ -n "$ARG_STRATEGY" ]; then
     case "$ARG_STRATEGY" in
+        tag) STRATEGY_FLAG="tag" ; STRATEGY_NAME="🏆 TAG 策略" ;;
         gto) STRATEGY_FLAG="gto" ; STRATEGY_NAME="📐 GTO 策略" ;;
         checkorfold) STRATEGY_FLAG="checkorfold" ; STRATEGY_NAME="🛡️ 保育策略" ;;
         exploitative) STRATEGY_FLAG="exploitative" ; STRATEGY_NAME="🎯 剥削策略" ;;
@@ -194,17 +195,19 @@ if [ "$SKIP_INTERACTIVE" = false ]; then
     if [ "$MODE_FLAG" = "--mode auto" ] || [ "$MODE_FLAG" = "--mode assist" ]; then
         echo ""
         echo -e "${BOLD}【2/4】决策策略${NC}"
-        echo -e "  ${GREEN}[1]${NC} range        - Range 策略（默认）"
-        echo -e "  ${CYAN}[2]${NC} exploitative - 剥削性策略"
-        echo -e "  ${YELLOW}[3]${NC} gto          - GTO 策略"
-        echo -e "  ${RED}[4]${NC} checkorfold  - 保守策略"
+        echo -e "  ${GREEN}[1]${NC} tag          - TAG 策略（默认，紧凶）"
+        echo -e "  ${CYAN}[2]${NC} range        - Range 策略"
+        echo -e "  ${YELLOW}[3]${NC} exploitative - 剥削性策略"
+        echo -e "  ${RED}[4]${NC} gto          - GTO 策略"
+        echo -e "  ${RED}[5]${NC} checkorfold  - 保守策略"
         echo ""
-        read -rp "  请输入策略 [1/2/3/4, 默认 1]: " strat_choice
+        read -rp "  请输入策略 [1/2/3/4/5, 默认 1]: " strat_choice
         case "$strat_choice" in
-            2) STRATEGY_FLAG="exploitative" ; STRATEGY_NAME="🎯 剥削性 (Exploitative)" ;;
-            3) STRATEGY_FLAG="gto" ; STRATEGY_NAME="📐 GTO 策略" ;;
-            4) STRATEGY_FLAG="checkorfold" ; STRATEGY_NAME="🛡️ 保守 (CheckOrFold)" ;;
-            *) STRATEGY_FLAG="range" ; STRATEGY_NAME="📊 Range 策略" ;;
+            2) STRATEGY_FLAG="range" ; STRATEGY_NAME="📊 Range 策略" ;;
+            3) STRATEGY_FLAG="exploitative" ; STRATEGY_NAME="🎯 剥削性 (Exploitative)" ;;
+            4) STRATEGY_FLAG="gto" ; STRATEGY_NAME="📐 GTO 策略" ;;
+            5) STRATEGY_FLAG="checkorfold" ; STRATEGY_NAME="🛡️ 保守 (CheckOrFold)" ;;
+            *) STRATEGY_FLAG="tag" ; STRATEGY_NAME="🏆 TAG 策略" ;;
         esac
     fi
 

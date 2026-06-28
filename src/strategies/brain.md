@@ -14,6 +14,12 @@
 
 ## 2. 策略逻辑细节
 
+### 2.0 TAG (紧凶型) - *默认策略*
+- **定位**: 介于 GTO 和 Exploitative 之间的平衡型紧凶打法，代码在 `strategies/tag.py`。
+- **翻前**: 基于位置（EP/MP/LP/SB/BB）和手牌等级做 RFI / vs Open / 3bet 决策，使用 `preflop_ranges.yaml` 范围表。
+- **翻后**: 基于 equity bucket 和 SPR 调整下注尺度，价值与诈唬的混合频率参考 GTO 表。
+- **配置**: `config/settings.yaml` 的 `strategy.type: tag`（也是代码默认值）。
+
 ### 2.1 Range (范围策略) - *稳健基石*
 - **核心标准**: 基于 **EHS (Effective Hand Strength)**。
 - **翻牌前**: 严格遵守 `preflop_ranges.yaml`。

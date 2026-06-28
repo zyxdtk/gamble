@@ -1,5 +1,22 @@
 # 更新日志
 
+## 2026-06-28 更新
+
+### 🐛 Bug 修复（详见 `fixes.md`）
+
+- **策略别名机制**: `Strategy` 基类新增 `strategy_aliases`，修复 `gto` 策略创建失败回退 balanced 的问题（`gto_solver.py` 注册键是 `gtosolver`，配置用 `gto` 对不上）
+- **卡住检测 + 自动换桌**: 桌子满员时连续 30 轮无法入座自动换桌，连续 5 次失败冷却 60s
+- **Raise 按钮置灰诊断**: payload 补 `my_chips` 字段；策略返回超额 raise 时打 `[筹码冲突]` WARNING；执行层检测 `disabled`/`opacity` 不再静默成功
+
+### 📝 文档更新
+
+- `CLAUDE.md`: 命令改为 `--platform/--game/--pilot` 新接口；策略列表从六种更新为九种，标注 `tag` 为默认
+- `README.md`: 运行命令和特性描述同步新接口和九种策略
+- `docs/architecture/strategy-engine.md`: 补充策略注册/别名机制说明、TAG 策略、`get_action_for_bet` 的不钳制 raise 金额注意事项
+- `docs/architecture/browser-platform.md`: 新增 Raise 按钮置灰检测、卡住检测与自动换桌、筹码冲突诊断章节
+- `docs/guide/browser-mode.md`: 新增策略选择章节、auto_mode 配置项
+- `src/strategies/brain.md`: 补充 TAG 策略说明
+
 ## 2026-06-07 更新
 
 ### 🎰 Ring Game 无限注现金桌

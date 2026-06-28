@@ -19,57 +19,146 @@ class EquityCalculator:
             cls._instance.evaluator = Evaluator() if Evaluator else None
         return cls._instance
     
-    def calculate_equity(self, hole_cards: list[str], community_cards: list[str], 
+    def calculate_equity(self, hole_cards: list[str], community_cards: list[str],
                          num_opponents: int = 1, iterations: int = 500) -> float:
         if not self.evaluator or not Card:
             return self._estimate_preflop_equity(hole_cards)
-        
+
         try:
             hero_cards = [self._to_treys(c) for c in hole_cards]
             board_cards = [self._to_treys(c) for c in community_cards]
-            
+
             if None in hero_cards or None in board_cards:
                 return 0.0
-            
+
             wins = 0
             ties = 0
-            
+
             deck = Deck()
             known_cards = hero_cards + board_cards
             for card in known_cards:
                 if card in deck.cards:
                     deck.cards.remove(card)
-            
+
             for _ in range(iterations):
                 current_deck = list(deck.cards)
                 random.shuffle(current_deck)
-                
+
                 villain_hands = []
                 for _ in range(num_opponents):
                     if len(current_deck) < 2:
                         break
                     villain_cards = [current_deck.pop(), current_deck.pop()]
                     villain_hands.append(villain_cards)
-                
+
                 cards_needed = 5 - len(board_cards)
                 if len(current_deck) < cards_needed:
                     continue
-                
+
                 sim_board = board_cards + [current_deck.pop() for _ in range(cards_needed)]
-                
+
                 hero_score = self.evaluator.evaluate(hero_cards, sim_board)
                 villain_scores = [self.evaluator.evaluate(vh, sim_board) for vh in villain_hands]
                 best_villain_score = min(villain_scores) if villain_scores else float('inf')
-                
+
                 if hero_score < best_villain_score:
                     wins += 1
                 elif hero_score == best_villain_score:
                     ties += 1
-            
+
             return (wins + (ties / 2)) / iterations
-        
+
         except Exception:
             return self._estimate_preflop_equity(hole_cards)
+
+    # 完整 52 张牌（字符串格式），用于范围对抗采样
+    _FULL_DECK_STR = [r + s for r in "AKQJT98765432" for s in "shdc"]
+
+    def calculate_equity_vs_range(self, hole_cards: list[str], community_cards: list[str],
+                                  opponent_range, num_opponents: int = 1,
+                                  iterations: int = 500) -> float:
+        """计算对抗对手推断范围的胜率。
+
+        对手手牌从范围模型按权重采样，而非随机。这模拟了人类玩家
+        "对手 3-bet → 范围 AA-QQ/AK → 我的 JJ 只有 35% 胜率" 的思考过程。
+
+        Args:
+            opponent_range: BaseRangeModel 实例，提供 sample_combo 方法
+            其余参数同 calculate_equity
+
+        范围采样失败（冲突太多）时自动回退到随机采样。
+        """
+        if not self.evaluator or not Card or not opponent_range:
+            return self.calculate_equity(hole_cards, community_cards, num_opponents, iterations)
+
+        try:
+            hero_cards = [self._to_treys(c) for c in hole_cards]
+            board_cards = [self._to_treys(c) for c in community_cards]
+
+            if None in hero_cards or None in board_cards:
+                return self.calculate_equity(hole_cards, community_cards, num_opponents, iterations)
+
+            known_str = set(hole_cards + community_cards)
+
+            wins = 0
+            ties = 0
+            valid = 0
+
+            for _ in range(iterations):
+                used_str = set(known_str)
+                villain_hands_str: list[list[str]] = []
+                failed = False
+
+                for _ in range(num_opponents):
+                    opp_cards = opponent_range.sample_combo(list(used_str))
+                    if opp_cards is None:
+                        failed = True
+                        break
+                    villain_hands_str.append(opp_cards)
+                    used_str.update(opp_cards)
+
+                if failed:
+                    # 范围采样失败 → 回退到随机
+                    remaining = [c for c in self._FULL_DECK_STR if c not in used_str]
+                    random.shuffle(remaining)
+                    villain_hands_str = []
+                    for _ in range(num_opponents):
+                        if len(remaining) < 2:
+                            break
+                        villain_hands_str.append([remaining.pop(), remaining.pop()])
+                    if len(villain_hands_str) < num_opponents:
+                        continue
+
+                # 补全公共牌
+                remaining = [c for c in self._FULL_DECK_STR if c not in used_str]
+                random.shuffle(remaining)
+                cards_needed = 5 - len(board_cards)
+                if len(remaining) < cards_needed:
+                    continue
+                new_board_str = [remaining.pop() for _ in range(cards_needed)]
+                sim_board_cards = board_cards + [self._to_treys(c) for c in new_board_str]
+
+                villain_treys = [[self._to_treys(c) for c in vh] for vh in villain_hands_str]
+                if any(None in vh for vh in villain_treys):
+                    continue
+
+                hero_score = self.evaluator.evaluate(hero_cards, sim_board_cards)
+                villain_scores = [self.evaluator.evaluate(vh, sim_board_cards) for vh in villain_treys]
+                best_villain_score = min(villain_scores) if villain_scores else float('inf')
+
+                if hero_score < best_villain_score:
+                    wins += 1
+                elif hero_score == best_villain_score:
+                    ties += 1
+                valid += 1
+
+            if valid == 0:
+                return self.calculate_equity(hole_cards, community_cards, num_opponents, iterations)
+
+            return (wins + (ties / 2)) / valid
+
+        except Exception:
+            return self.calculate_equity(hole_cards, community_cards, num_opponents, iterations)
     
     def calculate_ev(self, equity: float, pot: int, to_call: int,
                      raise_amount: int = 0, fold_equity: float = 0.0) -> dict:
@@ -246,18 +335,22 @@ class EquityCalculator:
     def detect_draws(self, hole_cards: list[str], community_cards: list[str]) -> dict:
         """
         探测当前的听牌情况（Flush Draw, OESD, Gutshot）
+
+        增强版：识别坚果同花听（A 高）和底端同花听（反向隐含赔率风险）。
         """
         result = {
             "flush_draw": False,
             "flush_outs": 0,
+            "nut_flush_draw": False,   # 坚果同花听：手牌有同花 A，买中即坚果
+            "low_flush_draw": False,   # 底端同花听：买中可能被更大同花压制
             "oesd": False,
             "gutshot": False,
             "straight_outs": 0
         }
-        
+
         if not hole_cards or len(hole_cards) < 2:
             return result
-            
+
         all_cards = hole_cards + community_cards
         if len(all_cards) < 4: # 至少 4 张才能听牌
             return result
@@ -268,6 +361,15 @@ class EquityCalculator:
             if suits.count(s) == 4:
                 result["flush_draw"] = True
                 result["flush_outs"] = 9
+                # 坚果/底端判定：检查 hero 手牌中该花色的最高牌
+                hero_flush_ranks = [c[0].upper() for c in hole_cards if c[1].lower() == s]
+                rank_map = {"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,"T":10,"J":11,"Q":12,"K":13,"A":14}
+                hero_flush_vals = [rank_map.get(r, 0) for r in hero_flush_ranks]
+                if hero_flush_vals and max(hero_flush_vals) == 14:
+                    result["nut_flush_draw"] = True
+                elif hero_flush_vals and max(hero_flush_vals) <= 7:
+                    # 手牌同花最高 ≤ 7，买中后易被更大同花压制
+                    result["low_flush_draw"] = True
                 break
 
         # 2. 探测顺子听牌 (使用点数去重排序)

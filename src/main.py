@@ -25,7 +25,7 @@ from src.utils.logger import bot_logger
 
 console = Console()
 
-AVAILABLE_STRATEGIES = ["gto", "range", "exploitative", "checkorfold", "aggressive", "neural", "icm"]
+AVAILABLE_STRATEGIES = ["tag", "gto", "range", "exploitative", "checkorfold", "aggressive", "neural", "icm"]
 
 
 def select_platform() -> str:
@@ -270,7 +270,7 @@ async def run_arena_ring(session: SessionConfig):
     """Arena Ring runner"""
     from src.platforms.arena.ring import RingConfig, RingPlayerConfig
 
-    strategies = ["gto", "range", "exploitative", "aggressive", "checkorfold"]
+    strategies = ["tag", "gto", "range", "exploitative", "aggressive", "checkorfold"]
     players = []
     num_players = 4
     has_human = session.pilot == PilotMode.ASSIST
@@ -357,7 +357,7 @@ async def run_mtt(args=None):
 
     # 注册参赛者
     manager = MTTManager(config)
-    strategies = ["gto", "range", "exploitative", "checkorfold", "aggressive"]
+    strategies = ["tag", "gto", "range", "exploitative", "checkorfold", "aggressive"]
     player_configs = []
     for i in range(config.entries):
         is_human = has_human and i == 0
@@ -542,7 +542,7 @@ async def run_sng(args=None):
         config = configure_sng()
 
     manager = SitAndGo(config)
-    strategies = ["gto", "range", "aggressive", "checkorfold", "exploitative", "icm"]
+    strategies = ["tag", "gto", "range", "aggressive", "checkorfold", "exploitative", "icm"]
     player_configs = []
     for i in range(config.num_players):
         is_human = has_human and i == 0
@@ -612,8 +612,8 @@ async def _browser_cli_decide(state, actions: dict) -> dict:
     payload = browser_state_to_payload(state, actions)
     to_call = int(actions.get("to_call", 0) or 0)
 
-    # GTO 策略默认（gto 是 balanced 的别名）
-    default = build_default(payload, strategy_name="gto")
+    # TAG 策略默认（紧凶策略，长期盈利稳健）
+    default = build_default(payload, strategy_name="tag")
 
     # 决策上下文，用于日志
     ctx = (
@@ -751,7 +751,7 @@ def parse_args():
                         help="游戏类型: ring(现金桌) | mtt(多桌赛) | sng(单桌赛) | competition(对抗赛)")
     parser.add_argument("--headless", action="store_true", help="浏览器无头模式")
     parser.add_argument("--stakes", help="偏好盲注级别 (如 1/2, 5/10)")
-    parser.add_argument("--strategy", help="策略类型 (扑克策略: gto/range/exploitative/checkorfold/aggressive/neural, 或桌子选择: fifo/most/least/random)")
+    parser.add_argument("--strategy", help="策略类型 (扑克策略: tag/gto/range/exploitative/checkorfold/aggressive/neural, 或桌子选择: fifo/most/least/random)")
     parser.add_argument("--hands", type=int, default=100, help="游戏手数（所有模式通用）")
     parser.add_argument("--arena-players", type=int, default=7, help="Arena 模式玩家数")
     parser.add_argument("--arena-stack", type=str, default=None,
@@ -783,7 +783,7 @@ def parse_args():
     # 其他参数
     parser.add_argument("--buyin", default="min",
                         help="ReplayPoker 买入量：min/max/default 或具体整数（默认 min）")
-    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="WARNING", help="控制台日志级别 (默认: WARNING)")
+    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO", help="控制台日志级别 (默认: INFO)")
 
     args = parser.parse_args()
 
@@ -842,7 +842,7 @@ async def main():
             platform=platform,
             game=game,
             pilot=pilot,
-            strategy=args.strategy or "gto",
+            strategy=args.strategy or "tag",
             platform_kwargs={
                 "headless": args.headless,
                 "stakes": args.stakes,

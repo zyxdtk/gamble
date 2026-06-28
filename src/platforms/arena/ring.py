@@ -1167,6 +1167,9 @@ class RingPlatform:
         if strategy_type == "balanced":
             from src.strategies.strategies.balanced import BalancedStrategy
             return BalancedStrategy(thinking_timeout=2.0)
+        elif strategy_type == "tag":
+            from src.strategies.strategies.tag import TightAggressiveStrategy
+            return TightAggressiveStrategy(thinking_timeout=2.0)
         elif strategy_type in ("gto", "gto_solver"):
             from src.strategies.strategies.gto_solver import GtoSolverStrategy
             return GtoSolverStrategy()

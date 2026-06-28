@@ -65,7 +65,7 @@ class BrowserPlatformConfig:
     max_duration_min: Optional[int] = None
     
     # 策略配置
-    strategy_type: str = "gto"
+    strategy_type: str = "tag"
     
     @classmethod
     def from_file(cls, config_path: str = "config/settings.yaml") -> 'BrowserPlatformConfig':
@@ -86,7 +86,7 @@ class BrowserPlatformConfig:
             
             # Strategy 配置
             strategy = data.get("strategy", {})
-            config.strategy_type = strategy.get("type", "gto")
+            config.strategy_type = strategy.get("type", "tag")
             
             # Game 配置
             game = data.get("game", {})
@@ -619,10 +619,18 @@ class BrowserPlatform(GamePlatform):
         dom_actions = await self.adapter.get_available_actions(page)
         result = self._validate_actions_with_ws(dom_actions, ws_state)
 
-        # 关键回退：如果 DOM 没拿到按钮但 WS 确认轮到我，用 WS 数据构造动作
-        if not result.get("available") and is_my_turn_ws:
-            result = self._build_actions_from_ws(ws_state)
-            bot_logger.debug(f"DOM 按钮为空，使用 WS 回退动作: {result}")
+        # DOM 按钮为空时不伪造动作：WS 的 is_my_turn 可能是过期状态
+        # （tick 到达后手牌可能已结束、或 DOM 正在街道过渡）。
+        # 伪造的动作列表会导致策略做出决策后点击不存在的按钮 → 必然失败。
+        # 返回空动作让 poll 循环等待按钮真正出现（通常 1-2 秒内 DOM 会渲染）。
+        if not result.get("available"):
+            if is_my_turn_ws:
+                bot_logger.debug(
+                    "WS 报告 is_my_turn=True 但 DOM 无按钮，等待按钮渲染 "
+                    f"(ws_to_call={ws_state.get('to_call', 0)}, "
+                    f"ws_min_raise={ws_state.get('min_raise', 0)})"
+                )
+            return {"available": [], "to_call": 0, "min_raise": 0, "presets": {}}
 
         return result
 
@@ -673,35 +681,6 @@ class BrowserPlatform(GamePlatform):
 
         return result
 
-    def _build_actions_from_ws(self, ws_state: Dict[str, Any]) -> Dict[str, Any]:
-        """当 DOM 按钮提取失败时，从 WS 状态构造可用动作"""
-        actions = {
-            "available": [],
-            "to_call": 0,
-            "min_raise": 0,
-            "presets": {},
-        }
-
-        to_call = ws_state.get("to_call", 0)
-        min_raise = ws_state.get("min_raise", 0)
-
-        # 基本动作：总是可以 fold
-        actions["available"].append("fold")
-
-        if to_call == 0:
-            # 不需要跟注 → 可以 check
-            actions["available"].append("check")
-        else:
-            # 需要跟注 → 可以 call
-            actions["available"].append("call")
-            actions["to_call"] = to_call
-
-        if min_raise > 0:
-            actions["available"].append("raise")
-            actions["min_raise"] = min_raise
-
-        return actions
-    
     async def execute_action(
         self,
         action: GameAction,
@@ -720,7 +699,7 @@ class BrowserPlatform(GamePlatform):
         preset = getattr(action, "bet_size_hint", None)
 
         # 日志：执行前
-        bot_logger.debug(
+        bot_logger.info(
             f"[执行动作] {action_name}"
             f"{f' amount={amount}' if amount else ''}"
             f"{f' preset={preset}' if preset else ''}"

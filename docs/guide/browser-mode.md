@@ -37,7 +37,23 @@ uv run python -m src.main --platform browser --game ring --headless
 2. 导航到大厅，根据配置选择最佳桌子
 3. 自动坐下并买入
 4. 循环执行：清除弹窗 → 确保入座 → 检查 WS 连接 → 获取状态 → 策略决策 → 执行动作
-5. 退出条件触发时离场（止损/止盈/筹码阈值）
+5. 卡住检测：连续 30 轮无法入座 → 自动换桌（连续 5 次仍失败则等 60s）
+6. 退出条件触发时离场（止损/止盈/筹码阈值）
+
+## 策略选择
+
+默认策略为 `tag`（紧凶型），可在 `config/settings.yaml` 或命令行修改：
+
+```bash
+uv run python -m src.main --platform browser --game ring --pilot auto --strategy tag           # 默认
+uv run python -m src.main --platform browser --game ring --pilot auto --strategy gto           # GTO 查表
+uv run python -m src.main --platform browser --game ring --pilot auto --strategy exploitative  # 剥削策略
+uv run python -m src.main --platform browser --game ring --pilot auto --strategy neural        # 深度学习
+```
+
+可用策略：`tag`(默认) / `gto` / `balanced` / `range` / `exploitative` / `aggressive` / `checkorfold` / `neural` / `icm`
+
+> `gto` 是 `gtosolver` 的别名（策略文件 `gto_solver.py` 注册键为 `gtosolver`，通过 `strategy_aliases` 注册 `gto` 别名）。
 
 ## 退出阈值
 
@@ -50,6 +66,10 @@ game:
     take_profit_bb: 300   # 盈利 300 BB 离桌
     low_chips_bb: -1      # 桌上筹码不足 N BB 离桌（-1 关闭）
     max_chips_bb: 800     # 桌上筹码超过 N BB 离桌
+
+auto_mode:
+  stuck_threshold: 30        # 连续N轮无法入座触发换桌
+  max_table_switches: 5      # 最大连续换桌次数（超过则等60s冷却）
 ```
 
 ## 桌子选择策略

@@ -48,15 +48,19 @@ class ActionPlan:
         根据当前环境做出最终裁决：
         1. 安全检测
         2. 混合策略机率决策
+        3. CHECK/FOLD 合法性修正（避免平台弹窗）
         """
         # A. 安全检测：如果对手下注超过我们的承受上限，强制退守 (通常为 FOLD)
         if to_call > self.limit_amount:
+            # 即使退守，to_call == 0 时也不能 FOLD（免费看牌必须 CHECK）
+            if to_call <= 0 and self.fallback_action == ActionType.FOLD:
+                return ActionType.CHECK, 0
             return self.fallback_action, self.fallback_amount
 
         # B. 混合策略决策：如果定义了备选动作，按概率随机挑选
         chosen_action = self.primary_action
         chosen_amount = self.primary_amount
-        
+
         if self.secondary_action and random.random() < self.secondary_probability:
             chosen_action = self.secondary_action
             chosen_amount = self.secondary_amount
@@ -65,6 +69,11 @@ class ActionPlan:
         # 除非它是备选动作或主动作已选定为 CALL/RAISE，否则降级
         if to_call > 0 and chosen_action == ActionType.CHECK:
             return self.fallback_action, self.fallback_amount
+
+        # D. 兜底逻辑：如果计划是 FOLD 但无需跟注（to_call == 0），
+        # 自动转为 CHECK（不能免费弃牌，避免 ReplayPoker 弹窗确认）
+        if to_call <= 0 and chosen_action == ActionType.FOLD:
+            return ActionType.CHECK, 0
 
         return chosen_action, chosen_amount
 
@@ -82,6 +91,8 @@ class ActionPlan:
             "reasoning": self.reasoning,
             "strategy_name": self.strategy_name,
             "my_equity": self.my_equity * 100, # HUD 期望百分比
+            "pot_odds": self.pot_odds,
+            "ev": self.ev,
             # 兼容旧 HUD 和日志逻辑
             "action": self.primary_action.value,
             "amount": self.primary_amount,

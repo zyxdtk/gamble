@@ -4,6 +4,7 @@ from .exploitative import ExploitativeStrategy
 from .range import RangeStrategy
 from .aggressive import AggressiveStrategy
 from .gto_solver import GtoSolverStrategy
+from .tag import TightAggressiveStrategy
 
 __all__ = [
     'CheckOrFoldStrategy',
@@ -14,6 +15,7 @@ __all__ = [
     'AggressiveStrategy',
     'ICMStrategy',
     'GtoSolverStrategy',
+    'TightAggressiveStrategy',
 ]
 
 

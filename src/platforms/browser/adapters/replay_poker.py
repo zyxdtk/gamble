@@ -973,6 +973,32 @@ class ReplayPokerAdapter(WebsiteAdapter):
                     btn = page.get_by_role("button", name=re.compile("Bet", re.IGNORECASE)).first
 
                 if await btn.count() > 0 and await btn.is_visible():
+                    # 诊断：检测 Raise 按钮是否被 ReplayPoker 置灰（金额超限等）
+                    # is_visible 不区分 disabled，需单独检查 disabled 属性与 opacity
+                    try:
+                        disabled_attr = await btn.get_attribute("disabled")
+                        btn_style = await btn.get_attribute("style") or ""
+                        btn_text = (await btn.text_content(timeout=1000) or "").strip()
+                    except Exception:
+                        disabled_attr, btn_style, btn_text = None, "", ""
+
+                    opacity_val = 1.0
+                    m_op = re.search(r'opacity:\s*([\d.]+)', btn_style)
+                    if m_op:
+                        try:
+                            opacity_val = float(m_op.group(1))
+                        except ValueError:
+                            pass
+
+                    if disabled_attr is not None or opacity_val < 0.5:
+                        bot_logger.warning(
+                            f"[Raise 按钮置灰] amount={amount}, disabled={disabled_attr is not None}, "
+                            f"opacity={opacity_val:.2f}, btn_text={btn_text!r}, "
+                            f"preset={preset}. 通常因 raise 金额超出自身筹码或低于最小加注。"
+                            f"动作将失败（点击置灰按钮无效）。"
+                        )
+                        return False
+
                     await human_delay("raise")
                     await btn.click()
                     return True

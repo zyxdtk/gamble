@@ -123,6 +123,12 @@ class ActionChoice:
     reasoning: str = ""                   # 默认动作的来源说明
     source: str = "manual"                # "manual" | "strategy:gto" | "fallback"
     raw: str = ""                         # 原始字符串（区分 RAISE / BET 等）
+    # 决策元数据（由策略 ActionPlan 拷贝，供手牌历史记录使用）
+    equity: float = 0.0
+    pot_odds: float = 0.0
+    ev: float = 0.0
+    confidence: float = 1.0
+    strategy_name: str = ""
 
 
 # ─── payload → GameState ───
@@ -178,7 +184,7 @@ _strategy_singleton: Dict[str, Any] = {}
 
 def get_strategy_suggestion(
     state: GameState,
-    strategy_name: str = "gto",
+    strategy_name: str = "tag",
 ) -> Optional[ActionChoice]:
     """运行指定策略，返回推荐动作。
 
@@ -211,6 +217,11 @@ def get_strategy_suggestion(
             reasoning=f"[{plan.strategy_name}] {plan.reasoning}",
             source=f"strategy:{strategy_name}",
             raw=action_type.value,
+            equity=plan.my_equity,
+            pot_odds=plan.pot_odds,
+            ev=plan.ev,
+            confidence=plan.confidence,
+            strategy_name=plan.strategy_name,
         )
     except Exception as e:
         cli_logger.warning(f"策略建议失败: {e}")
@@ -344,7 +355,7 @@ def heuristic_default(available: List[str], to_call: int) -> ActionChoice:
 
 def build_default(
     payload: Dict[str, Any],
-    strategy_name: str = "gto",
+    strategy_name: str = "tag",
 ) -> ActionChoice:
     """根据 payload 构造默认动作：优先 GTO 策略，失败回退到启发式"""
     available = payload.get("available_actions") or payload.get("available") or []
@@ -719,7 +730,7 @@ async def prompt_table_action(
 async def decide_hand_with_strategy(
     payload: Dict[str, Any],
     prompt_prefix: str = "browser",
-    strategy_name: str = "gto",
+    strategy_name: str = "tag",
     context: str = "",
 ) -> Tuple[str, int]:
     """便捷函数：返回 (action, amount) 元组（兼容旧 caller 签名）"""
