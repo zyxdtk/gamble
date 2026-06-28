@@ -87,14 +87,29 @@ class EventBus:
                 try:
                     callback(event)
                 except Exception as e:
-                    logger.error(f"Error in event subscriber: {e}")
-        
+                    from src.utils.diagnostics import log_exception_with_traceback
+                    log_exception_with_traceback(
+                        logger, e,
+                        f"[events] Error in event subscriber event_type={event_type} "
+                        f"cb={getattr(callback, '__name__', str(callback))}",
+                        level=logging.ERROR,
+                        event_type=str(event_type),
+                        cb=getattr(callback, "__name__", str(callback)),
+                    )
+
         # Notify all-subscribers
         for callback in self._all_subscribers:
             try:
                 callback(event)
             except Exception as e:
-                logger.error(f"Error in all-event subscriber: {e}")
+                from src.utils.diagnostics import log_exception_with_traceback
+                log_exception_with_traceback(
+                    logger, e,
+                    f"[events] Error in all-event subscriber "
+                    f"cb={getattr(callback, '__name__', str(callback))}",
+                    level=logging.ERROR,
+                    cb=getattr(callback, "__name__", str(callback)),
+                )
 
     def unsubscribe(self, event_type: EventType, callback: Callable) -> None:
         """Unsubscribe from an event type."""

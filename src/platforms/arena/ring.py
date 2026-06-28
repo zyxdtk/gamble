@@ -212,7 +212,13 @@ class RingPlayer:
         except asyncio.CancelledError:
             arena_logger.info(f"玩家 {self.name} 任务被取消")
         except Exception as e:
-            arena_logger.error(f"玩家 {self.name} 运行错误: {e}")
+            from src.utils.diagnostics import log_exception_with_traceback
+            log_exception_with_traceback(
+                arena_logger, e,
+                f"[arena] 玩家 {self.name} 运行错误",
+                level=logging.ERROR,
+                player_name=self.name,
+            )
 
     async def _handle_message(self, msg: Message) -> Optional[Message]:
         """处理收到的消息，返回可选的响应"""
@@ -438,7 +444,12 @@ class RingPlayer:
 
             return gs
         except Exception as e:
-            arena_logger.error(f"恢复 GameState 失败: {e}")
+            from src.utils.diagnostics import log_exception_with_traceback
+            log_exception_with_traceback(
+                arena_logger, e,
+                f"[arena] 恢复 GameState 失败 table={self.config.table_id if hasattr(self, 'config') else '?'}",
+                level=logging.ERROR,
+            )
             return None
 
     def update_global_stats(self, seat_id: int, is_vpip: bool, is_pfr: bool) -> None:
@@ -635,7 +646,13 @@ class RingPlatform:
             except asyncio.TimeoutError:
                 arena_logger.warning(f"[RING] 玩家 {player.name} 桌位决策超时")
             except Exception as e:
-                arena_logger.error(f"[RING] 玩家 {player.name} 桌位决策错误: {e}")
+                from src.utils.diagnostics import log_exception_with_traceback
+                log_exception_with_traceback(
+                    arena_logger, e,
+                    f"[RING] 玩家 {player.name} 桌位决策错误",
+                    level=logging.ERROR,
+                    player_name=player.name,
+                )
 
             # 如果玩家离场，检查是否还有足够玩家
             if not player.is_seated:

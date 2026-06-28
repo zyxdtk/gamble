@@ -13,8 +13,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import enum
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,6 +26,8 @@ from rich.table import Table
 
 from src.strategies.game_state import GameState, Player as StrategyPlayer
 from src.strategies.strategy_manager import StrategyManager
+
+from .diagnostics import log_exception_with_traceback  # noqa: E402
 
 console = Console()
 cli_logger = logging.getLogger("cli_player")
@@ -141,10 +145,54 @@ def payload_to_gamestate(payload: Dict[str, Any], my_seat_id: Optional[int] = No
     - pot / to_call / min_raise / max_raise: int
     - my_seat_id: int（调用方未传时回退到 payload 字段）
     - players: Dict[str|int, {name, chips, status, is_active, hands_played, vpip_actions, pfr_actions}]
+
+    安全检查：hole_cards 必须严格 2 张合法牌；community_cards 不能包含 hole_cards
+    （防状态污染导致策略拿到错牌；6/28 多次出现 reasoning 引用了已不在局的旧牌）。
     """
     gs = GameState()
-    gs.hole_cards = list(payload.get("hole_cards") or [])
-    gs.community_cards = list(payload.get("community_cards") or [])
+    raw_hole = list(payload.get("hole_cards") or [])
+    raw_community = list(payload.get("community_cards") or [])
+
+    # 牌值合法性：rank∈[2-9TJQKA] + suit∈[cdhs]
+    _VALID_CARD = re.compile(r"^[2-9TJQKA][cdhs]$", re.IGNORECASE)
+
+    def _valid_card(c):
+        if not c or not isinstance(c, str) or len(c) < 2:
+            return False
+        return bool(_VALID_CARD.match(c))
+
+    # 清洗 hole_cards：过滤非法值，去重
+    clean_hole = []
+    for c in raw_hole:
+        if _valid_card(c) and c not in clean_hole:
+            clean_hole.append(c)
+    if len(clean_hole) != len(raw_hole):
+        cli_logger.warning(
+            f"[sanity] hole_cards 含非法/重复值: raw={raw_hole} → clean={clean_hole}"
+        )
+    # 限制为 2 张
+    if len(clean_hole) > 2:
+        cli_logger.warning(
+            f"[sanity] hole_cards 超过 2 张: {clean_hole} → 截断为前 2 张"
+        )
+        clean_hole = clean_hole[:2]
+    gs.hole_cards = clean_hole
+
+    # 清洗 community_cards
+    clean_community = []
+    for c in raw_community:
+        if _valid_card(c) and c not in clean_community:
+            clean_community.append(c)
+    gs.community_cards = clean_community
+
+    # 防御：community 不应包含 hole
+    if gs.hole_cards and any(c in gs.community_cards for c in gs.hole_cards):
+        leaked = [c for c in gs.hole_cards if c in gs.community_cards]
+        cli_logger.warning(
+            f"[sanity] community_cards 包含 hole_cards: {leaked} → 从 community 移除"
+        )
+        gs.community_cards = [c for c in gs.community_cards if c not in gs.hole_cards]
+
     gs.pot = int(payload.get("pot", 0) or 0)
     gs.to_call = int(payload.get("to_call", 0) or 0)
     gs.min_raise = int(payload.get("min_raise", 0) or 0)
@@ -182,6 +230,110 @@ def payload_to_gamestate(payload: Dict[str, Any], my_seat_id: Optional[int] = No
 _strategy_singleton: Dict[str, Any] = {}
 
 
+# ─── 反 limp 守卫（翻前） ───
+# 数据依据：6/28 当日 71 局中，"未面对 raise 的翻前跟注"进翻后 26 局总亏 -811 (-31/局)。
+# 来源：limped pot 中 Tier 3 手牌（88/77/AJs/QJs 等）跟注控池无意义，胜率与底池不成比例。
+# 解决：limped pot（to_call > 0 且 to_call <= bb，无人加注）时，Tier 3+ 手牌 call 强制改 fold。
+_ANTI_LIMP_MAX_TIER = 2  # 允许跟 limp 的最大 tier（1=Tier1 顶级, 2=Tier2 强牌, 3+=拒绝）
+# 允许跟 limp 的 Tier 3 例外：同花连牌有隐含赔率
+_LIMP_SUITED_CONNECTOR_TIERS = {3}  # 仅在 SUITED CONNECTOR 时允许 Tier 3 跟 limp
+
+
+def _is_limp_pot(to_call: int, big_blind: int, pot: int) -> bool:
+    """检测是否处于 limped pot：有人跟注但无人加注。
+
+    判据（保守）：
+    - to_call > 0（确实需要付钱）
+    - to_call <= big_blind（只需要跟盲注，未被加注）
+    - pot <= 4 * big_blind（底池很小，间接佐证无人加注）
+    """
+    if big_blind <= 0:
+        return False
+    if to_call <= 0:
+        return False
+    if to_call > big_blind:
+        return False
+    if pot > 4 * big_blind:
+        return False
+    return True
+
+
+def _hand_tier_for_cards(hole_cards) -> int:
+    """计算给定手牌的 tier，1=顶级, 4=垃圾。"""
+    try:
+        from src.strategies.utils.position import normalize_hand_string
+        from src.strategies.utils.preflop_range import PreflopRangeManager
+        if not hole_cards or len(hole_cards) < 2:
+            return 4
+        hand_str = normalize_hand_string(hole_cards)
+        mgr = PreflopRangeManager()
+        return mgr.get_hand_tier(hand_str)
+    except Exception:
+        return 4
+
+
+def _is_suited_connector(hole_cards) -> bool:
+    """是否是同花连牌（同花 + rank 相连）。"""
+    if not hole_cards or len(hole_cards) < 2:
+        return False
+    ranks = "23456789TJQKA"
+    try:
+        c1, c2 = hole_cards[0], hole_cards[1]
+        if not c1 or not c2 or len(c1) < 2 or len(c2) < 2:
+            return False
+        if c1[1].lower() != c2[1].lower():
+            return False
+        r1, r2 = ranks.index(c1[0].upper()), ranks.index(c2[0].upper())
+        if abs(r1 - r2) == 1:
+            return True
+    except (ValueError, IndexError):
+        return False
+    return False
+
+
+def anti_limp_guard(suggestion, state) -> Any:
+    """翻前反 limp 守卫：弱牌拒绝跟 limped pot。
+
+    替换策略推荐：策略说 call 且处于 limped pot 且手牌 tier 太低 → 改 fold。
+    返回原 suggestion 或新构造的 fold 决策。
+    """
+    if suggestion is None:
+        return suggestion
+    if suggestion.action != "call":
+        return suggestion
+    if state.current_stage != "preflop":
+        return suggestion
+    if not _is_limp_pot(state.to_call, state.big_blind, state.pot):
+        return suggestion
+    if not state.hole_cards or len(state.hole_cards) < 2:
+        return suggestion
+
+    tier = _hand_tier_for_cards(state.hole_cards)
+
+    # Tier 1-2 一律允许跟 limp（顶级/强牌有隐含赔率）
+    if tier <= _ANTI_LIMP_MAX_TIER:
+        return suggestion
+
+    # Tier 3 例外：同花连牌允许跟 limp
+    if tier in _LIMP_SUITED_CONNECTOR_TIERS and _is_suited_connector(state.hole_cards):
+        return suggestion
+
+    # 其余 Tier 3+：强制改 fold
+    new_suggestion = copy.copy(suggestion)
+    new_suggestion.action = "fold"
+    new_suggestion.amount = 0
+    new_suggestion.reasoning = (
+        f"[anti-limp] Tier{tier}拒跟limp pot(to_call={state.to_call},pot={state.pot}) | "
+        f"原:{suggestion.reasoning}"
+    )
+    new_suggestion.source = "anti_limp_guard"
+    cli_logger.info(
+        f"[anti-limp] 翻前 limp pot 守卫生效: {state.hole_cards} tier={tier} "
+        f"to_call={state.to_call} pot={state.pot} → fold"
+    )
+    return new_suggestion
+
+
 def get_strategy_suggestion(
     state: GameState,
     strategy_name: str = "tag",
@@ -204,6 +356,14 @@ def get_strategy_suggestion(
 
         plan = strategy.make_decision(state)
         if plan is None:
+            # 策略没返回（极少见）→ 业务异常，不是 silent
+            cli_logger.warning(
+                "[get_strategy_suggestion] 策略 %r make_decision 返回 None，"
+                "回退到启发式: hand=%s, street=%s, pot=%s, to_call=%s",
+                strategy_name, getattr(state, "hole_cards", "?"),
+                getattr(state, "current_stage", "?"), getattr(state, "pot", "?"),
+                getattr(state, "to_call", "?"),
+            )
             return None
 
         to_call = state.to_call
@@ -224,7 +384,19 @@ def get_strategy_suggestion(
             strategy_name=plan.strategy_name,
         )
     except Exception as e:
-        cli_logger.warning(f"策略建议失败: {e}")
+        # 关键：必须带 traceback，否则只看到 str(e) 无法定位
+        # traceback.format_exc() 来自 _diagnostics，确保 from .diagnostics 已被导入
+        log_exception_with_traceback(
+            cli_logger, e,
+            f"[get_strategy_suggestion] 策略 '{strategy_name}' make_decision 抛异常，"
+            "回退到启发式",
+            strategy_name=strategy_name,
+            hand=getattr(state, "hole_cards", "?"),
+            street=getattr(state, "current_stage", "?"),
+            pot=getattr(state, "pot", "?"),
+            to_call=getattr(state, "to_call", "?"),
+            my_seat_id=getattr(state, "my_seat_id", "?"),
+        )
         return None
 
 
@@ -341,16 +513,312 @@ def resolve_amount(token: str, payload: Dict[str, Any]) -> Optional[int]:
     return presets.get(token)
 
 
+# ─── 策略→浏览器 动作适配器 ───
+# 策略在抽象层输出（raise to X, bet Y, call Z），但浏览器真实层有 allin / min-raise cap / call-allin 等约束
+# 适配器负责把策略意图翻译成浏览器真实可执行动作
+#
+# 映射表：
+# ┌─────────────────┬────────────────────┬────────────────────────┐
+# │ 策略推荐         │ 浏览器可用         │ 适配结果               │
+# ├─────────────────┼────────────────────┼────────────────────────┤
+# │ raise to X      │ raise              │ raise (X)              │
+# │ raise to X      │ allin only         │ allin (chips)          │
+# │ raise to X      │ call only          │ call (to_call)         │
+# │ raise to X      │ check only         │ check                  │
+# │ bet X           │ bet                │ bet (X)                │
+# │ bet X           │ allin only         │ allin (chips)          │
+# │ call            │ call (full)        │ call (to_call)         │
+# │ call            │ allin only         │ allin (chips)          │
+# │ call            │ check              │ check                  │
+# │ check           │ check              │ check                  │
+# │ fold            │ fold               │ fold                   │
+# │ raise to X      │ raise + allin      │ raise (X)              │
+# └─────────────────┴────────────────────┴────────────────────────┘
+
+def _coerce_amount_to_chips(amount: int, chips: int) -> int:
+    """把策略给的 amount 修正到合法范围：<= chips, >= 0"""
+    if amount is None or amount <= 0:
+        return max(0, chips)
+    return min(int(amount), max(0, chips))
+
+
+def adapt_strategy_to_browser_action(
+    suggestion: ActionChoice,
+    available_actions: List[str],
+    *,
+    chips: int,
+    to_call: int,
+    pot: int,
+    state: Optional["GameState"] = None,
+    logger: Optional[logging.Logger] = None,
+) -> ActionChoice:
+    """把策略推荐的 ActionChoice 适配到浏览器真实可执行的动作
+
+    关键修复：策略想 raise / bet，但浏览器只 allin 可用 → 改为 allin
+    关键修复：策略想 call，但筹码 < to_call → 改为 allin
+
+    Args:
+        suggestion:        策略输出的 ActionChoice
+        available_actions: 浏览器当前可执行动作（已归一化: check/call/bet/raise/fold/allin）
+        chips:            我方剩余筹码
+        to_call:          需要跟注的金额
+        pot:              当前底池
+        state:            完整 GameState（用于取 hole_cards/street 给日志）
+        logger:           日志对象
+
+    Returns:
+        适配后的 ActionChoice（如果浏览器无任何可执行动作，保留 suggestion 触发上游 fallback）
+    """
+    lg = logger or cli_logger
+    avail = {normalize_action(a) for a in (available_actions or [])}
+    action = normalize_action(suggestion.action)
+    chips = int(chips or 0)
+    to_call = int(to_call or 0)
+    pot = int(pot or 0)
+
+    hole_dbg = getattr(state, "hole_cards", "?") if state else "?"
+    street_dbg = getattr(state, "current_stage", "?") if state else "?"
+
+    # ── fold: 永远透传 ──
+    if action == "fold":
+        return suggestion
+
+    # ── check: 浏览器必须能 check，否则退化 call/fold ──
+    if action == "check":
+        if "check" in avail:
+            return suggestion
+        # 策略想 free-check 但必须付钱 → 改 call（或 allin if 筹码不够）
+        if "call" in avail:
+            call_amt = min(to_call, chips)
+            label = f"call ({call_amt})"
+            new_action = "call"
+            new_amt = call_amt
+        elif "allin" in avail:
+            new_action, new_amt, label = "allin", chips, f"allin ({chips})"
+        else:
+            # 连 call 都没有 → 改 fold（暴露完整诊断链）
+            lg.warning(
+                f"[adapter] 策略推荐 check 但浏览器无 check/call/allin，降级为 fold\n"
+                f"  策略推荐: action={suggestion.action!r}, reasoning={suggestion.reasoning!r}\n"
+                f"  浏览器可用: raw={available_actions}, normalized={avail}\n"
+                f"  状态: street={street_dbg}, hole={hole_dbg}, to_call={to_call}, "
+                f"chips={chips}, pot={pot}\n"
+                f"  策略元数据: equity={suggestion.equity:.3f}, ev={suggestion.ev:.1f}"
+            )
+            return ActionChoice(
+                "fold", 0, "fold",
+                f"[adapter] check→fold (avail={avail})",
+                source=suggestion.source or "adapter",
+            )
+        lg.info(
+            f"[adapter] 策略推荐 check，但浏览器必须付钱 → {new_action} {new_amt}: "
+            f"street={street_dbg}, hole={hole_dbg}, to_call={to_call}, chips={chips}"
+        )
+        return ActionChoice(
+            new_action, new_amt, label,
+            f"[adapter] check→{new_action} ({new_amt}) | {suggestion.reasoning}",
+            source=suggestion.source or "adapter",
+        )
+
+    # ── raise / bet ──
+    if action in ("raise", "bet"):
+        # 情形 1：raise/bet 直接可用 → 透传（修正 amount 不超过 chips）
+        if action in avail:
+            new_amt = _coerce_amount_to_chips(suggestion.amount, chips)
+            if new_amt != suggestion.amount and new_amt > 0:
+                lg.info(
+                    f"[adapter] 策略推荐 {action} {suggestion.amount} 但 chips={chips} "
+                    f"→ 修正为 {action} {new_amt}: street={street_dbg}, hole={hole_dbg}"
+                )
+            return ActionChoice(
+                action, new_amt,
+                f"{action} ({new_amt})" if new_amt > 0 else action,
+                f"[adapter] {action} 修正 {suggestion.amount}→{new_amt} | {suggestion.reasoning}",
+                source=suggestion.source or "adapter",
+            )
+
+        # 情形 2：只有 allin 可用 → 改为 allin（关键修复）
+        if "allin" in avail:
+            new_amt = chips
+            lg.info(
+                f"[adapter] 策略推荐 {action} {suggestion.amount} 但浏览器只 allin 可用 "
+                f"→ 改为 allin ({new_amt}): street={street_dbg}, hole={hole_dbg}, "
+                f"pot={pot}, to_call={to_call}"
+            )
+            return ActionChoice(
+                "allin", new_amt, f"allin ({new_amt})",
+                f"[adapter] {action}→allin ({new_amt}) | {suggestion.reasoning}",
+                source=suggestion.source or "adapter",
+            )
+
+        # 情形 3：只有 call 可用 → 改 call（除非 to_call > chips 走 allin 路径）
+        if "call" in avail:
+            if to_call <= chips:
+                lg.info(
+                    f"[adapter] 策略推荐 {action} 但浏览器只 call 可用 → 降级为 call: "
+                    f"street={street_dbg}, hole={hole_dbg}, to_call={to_call}, chips={chips}"
+                )
+                return ActionChoice(
+                    "call", to_call, f"call ({to_call})",
+                    f"[adapter] {action}→call | {suggestion.reasoning}",
+                    source=suggestion.source or "adapter",
+                )
+            # 筹码不够 call 完整 to_call → 改 allin（理论上不会出现，因为 allin 不在 avail）
+            # 但如果浏览器没列 allin 但筹码不够 call，会报错。
+            lg.warning(
+                f"[adapter] 策略推荐 {action} 浏览器只 call 但 chips={chips} < to_call={to_call}，"
+                f"无法执行，保留建议让上游 fallback: street={street_dbg}, hole={hole_dbg}"
+            )
+            return suggestion
+
+        # 情形 4：只有 check / fold → 无法加注
+        if "check" in avail:
+            lg.info(
+                f"[adapter] 策略推荐 {action} 但浏览器只 check 可用 → 降级为 check: "
+                f"street={street_dbg}, hole={hole_dbg}"
+            )
+            return ActionChoice(
+                "check", 0, "check",
+                f"[adapter] {action}→check | {suggestion.reasoning}",
+                source=suggestion.source or "adapter",
+            )
+        # 唯一可执行是 fold
+        if "fold" in avail:
+            lg.warning(
+                f"[adapter] 策略推荐 {action} 但浏览器无可执行加注动作 → 降级为 fold: "
+                f"street={street_dbg}, hole={hole_dbg}, avail={avail}"
+            )
+            return ActionChoice(
+                "fold", 0, "fold",
+                f"[adapter] {action}→fold (无可用加注) | {suggestion.reasoning}",
+                source=suggestion.source or "adapter",
+            )
+        # 浏览器无任何动作（极少见）→ 透传让上游处理
+        return suggestion
+
+    # ── call ──
+    if action == "call":
+        # 情形 1：call 可用且筹码够 → 透传，但修正 amount 为 to_call
+        # （策略常传 0，浏览器实际需 to_call；保持 amount 与实际一致便于手牌历史记录）
+        if "call" in avail and to_call <= chips:
+            if suggestion.amount != to_call:
+                return ActionChoice(
+                    suggestion.action, to_call,
+                    f"call ({to_call})",
+                    f"[adapter] call 修正 amount {suggestion.amount}→{to_call} | {suggestion.reasoning}",
+                    source=suggestion.source or "adapter",
+                )
+            return suggestion
+        # 情形 2：筹码 < to_call 但有 allin → 改 allin
+        if "allin" in avail and chips < to_call:
+            lg.info(
+                f"[adapter] 策略推荐 call {to_call} 但 chips={chips} 不足 → 改为 allin: "
+                f"street={street_dbg}, hole={hole_dbg}, to_call={to_call}"
+            )
+            return ActionChoice(
+                "allin", chips, f"allin ({chips})",
+                f"[adapter] call→allin (筹码不足) | {suggestion.reasoning}",
+                source=suggestion.source or "adapter",
+            )
+        # 情形 3：call 不可用但 check 可用 → 改 check
+        if "call" not in avail and "check" in avail:
+            lg.info(
+                f"[adapter] 策略推荐 call 但浏览器只 check 可用 → 降级为 check: "
+                f"street={street_dbg}, hole={hole_dbg}"
+            )
+            return ActionChoice(
+                "check", 0, "check",
+                f"[adapter] call→check | {suggestion.reasoning}",
+                source=suggestion.source or "adapter",
+            )
+        # 情形 4：fold 是唯一选择
+        if "call" not in avail and "fold" in avail:
+            lg.warning(
+                f"[adapter] 策略推荐 call 但浏览器无法 call → 降级为 fold: "
+                f"street={street_dbg}, hole={hole_dbg}, avail={avail}"
+            )
+            return ActionChoice(
+                "fold", 0, "fold",
+                f"[adapter] call→fold (不可用) | {suggestion.reasoning}",
+                source=suggestion.source or "adapter",
+            )
+        return suggestion
+
+    # ── allin: 透传（已在 avail 里）──
+    if action == "allin":
+        if "allin" in avail:
+            return ActionChoice(
+                "allin", chips, f"allin ({chips})",
+                suggestion.reasoning, source=suggestion.source or "adapter",
+            )
+        # 策略想 allin 但浏览器没列 → 降级 raise/bet
+        if "raise" in avail:
+            return ActionChoice("raise", chips, f"raise ({chips})",
+                                f"[adapter] allin→raise | {suggestion.reasoning}",
+                                source=suggestion.source or "adapter")
+        if "bet" in avail:
+            return ActionChoice("bet", chips, f"bet ({chips})",
+                                f"[adapter] allin→bet | {suggestion.reasoning}",
+                                source=suggestion.source or "adapter")
+        if "call" in avail:
+            return ActionChoice("call", to_call, f"call ({to_call})",
+                                f"[adapter] allin→call | {suggestion.reasoning}",
+                                source=suggestion.source or "adapter")
+        return ActionChoice("fold", 0, "fold",
+                            f"[adapter] allin→fold (无 allin/raise/bet/call) | {suggestion.reasoning}",
+                            source=suggestion.source or "adapter")
+
+    # 未知动作：透传
+    return suggestion
+
+
 # ─── 默认动作（兜底启发式）───
 
-def heuristic_default(available: List[str], to_call: int) -> ActionChoice:
-    """当策略建议不可用时的回退默认：check > call > fold"""
+def heuristic_default(
+    available: List[str],
+    to_call: int,
+    hole_cards: Optional[List[str]] = None,
+    pot: int = 0,
+    street: str = "",
+) -> ActionChoice:
+    """当策略建议不可用时的回退默认
+
+    优先级：
+    1. 能 check 就 check（免费）
+    2. 必须 call 时：只有免费（to_call=0）才 call，否则 fold
+       - 旧版"call > fold"会主动送钱，例如 J2o 跟注 5 筹码的 c-bet
+       - 没有策略支撑时，不应该默认 call 任何有成本的牌
+    3. 兜底 fold
+
+    Args:
+        available:  可用动作列表（已归一化）
+        to_call:    需要跟注的金额
+        hole_cards: 底牌（用于诊断日志）
+        pot:        当前底池（用于诊断日志）
+        street:     当前街道（用于诊断日志）
+    """
     avail_norm = {normalize_action(a) for a in available}
     if "check" in avail_norm:
-        return ActionChoice("check", 0, "check", "回退默认：check > call > fold", "fallback")
-    if "call" in avail_norm:
-        return ActionChoice("call", to_call, f"call ({to_call})", "回退默认：check > call > fold", "fallback")
-    return ActionChoice("fold", 0, "fold", "回退默认：check > call > fold", "fallback")
+        return ActionChoice(
+            "check", 0, "check",
+            f"回退默认: check (street={street}, pot={pot}, to_call={to_call})",
+            "fallback",
+        )
+    # 必须 call 时：只在免费或 0 跟注时 call，否则 fold
+    if "call" in avail_norm and to_call == 0:
+        return ActionChoice(
+            "call", 0, "call",
+            f"回退默认: call (to_call=0, street={street}, pot={pot}, "
+            f"hole={hole_cards})",
+            "fallback",
+        )
+    # 有成本 + 无策略 → fold（避免盲打）
+    return ActionChoice(
+        "fold", 0, "fold",
+        f"回退默认: fold (无策略，to_call={to_call}, pot={pot}, "
+        f"street={street}, hole={hole_cards})",
+        "fallback",
+    )
 
 
 def build_default(
@@ -360,21 +828,70 @@ def build_default(
     """根据 payload 构造默认动作：优先 GTO 策略，失败回退到启发式"""
     available = payload.get("available_actions") or payload.get("available") or []
     to_call = int(payload.get("to_call", 0) or 0)
+    pot = int(payload.get("pot", 0) or 0)
+    street = payload.get("current_stage", "")
+    hole_cards = payload.get("hole_cards") or []
 
     state = payload_to_gamestate(payload)
     if state.hole_cards and len(state.hole_cards) >= 2 and state.my_seat_id is not None:
         suggestion = get_strategy_suggestion(state, strategy_name)
         if suggestion is not None:
-            # 仅当策略推荐的动作在可用列表里时才采用
-            avail_norm = {normalize_action(a) for a in available}
-            if suggestion.action in avail_norm:
-                return suggestion
-            # 策略推荐不在 available 里（极少见）→ 回退
-            cli_logger.debug(
-                f"策略推荐 {suggestion.action} 不在可用动作 {avail_norm}，回退到启发式"
+            # ── 反 limp 守卫：避免弱牌在 limped pot 跟注（数据：当日 -811/26局） ──
+            suggestion = anti_limp_guard(suggestion, state)
+            # ── 适配器：把策略推荐映射到浏览器真实可执行动作 ──
+            # 关键场景：策略想 raise/bet，但浏览器只 allin → 改为 allin
+            #           策略想 call，但 chips < to_call → 改为 allin
+            #           策略想 check，但必须付钱 → 改为 call
+            adapted = adapt_strategy_to_browser_action(
+                suggestion, available,
+                chips=int(payload.get("my_chips", 0) or 0),
+                to_call=to_call,
+                pot=pot,
+                state=state,
+                logger=cli_logger,
             )
+            # 适配器成功（即结果是浏览器可执行的动作）
+            avail_norm = {normalize_action(a) for a in available}
+            if adapted.action in avail_norm:
+                return adapted
+            # 适配器未能落地（极少见，浏览器无可用动作）→ 回退
+            # 暴露完整诊断链：策略原始推荐 → 适配结果 → 浏览器可用 → 为什么不行
+            cli_logger.warning(
+                f"[fallback] 适配后 {adapted.action!r} 仍不在可用动作 {avail_norm}，"
+                f"回退到启发式\n"
+                f"  策略原始推荐: action={suggestion.action!r}, amount={suggestion.amount}, "
+                f"reasoning={suggestion.reasoning!r}\n"
+                f"  适配结果: action={adapted.action!r}, amount={adapted.amount}, "
+                f"reasoning={adapted.reasoning!r}\n"
+                f"  浏览器可用: raw={available}, normalized={avail_norm}\n"
+                f"  状态: street={street}, hole={hole_cards}, pot={pot}, "
+                f"to_call={to_call}, my_chips={int(payload.get('my_chips', 0) or 0)}, "
+                f"min_raise={int(payload.get('min_raise', 0) or 0)}, "
+                f"max_raise={int(payload.get('max_raise', 0) or 0)}\n"
+                f"  策略元数据: equity={suggestion.equity:.3f}, pot_odds={suggestion.pot_odds:.3f}, "
+                f"ev={suggestion.ev:.1f}, confidence={suggestion.confidence:.2f}"
+            )
+        else:
+            # 策略没返回（None 或抛错）→ 打 warning
+            avail_norm = {normalize_action(a) for a in available}
+            cli_logger.warning(
+                f"[fallback] 策略 '{strategy_name}' 未返回建议（make_decision 返回 None），"
+                f"回退到启发式\n"
+                f"  浏览器可用: raw={available}, normalized={avail_norm}\n"
+                f"  状态: street={street}, hole={hole_cards}, pot={pot}, "
+                f"to_call={to_call}, my_chips={int(payload.get('my_chips', 0) or 0)}"
+            )
+    else:
+        # payload 不完整（无底牌或无座位）→ 不能用策略
+        cli_logger.warning(
+            f"[fallback] payload 缺关键字段，回退到启发式\n"
+            f"  缺失: hole_cards={hole_cards} ({'OK' if hole_cards else '空'}), "
+            f"my_seat_id={state.my_seat_id} ({'OK' if state.my_seat_id is not None else 'None'})\n"
+            f"  状态: street={street}, pot={pot}, to_call={to_call}\n"
+            f"  浏览器可用: raw={available}"
+        )
 
-    return heuristic_default(available, to_call)
+    return heuristic_default(available, to_call, hole_cards, pot, street)
 
 
 # ─── 渲染 ───

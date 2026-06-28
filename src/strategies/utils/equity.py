@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 import random
 
 try:
@@ -7,6 +8,8 @@ except ImportError:
     Card = None
     Evaluator = None
     Deck = None
+
+equity_logger = logging.getLogger("equity_calc")
 
 
 class EquityCalculator:
@@ -68,7 +71,15 @@ class EquityCalculator:
 
             return (wins + (ties / 2)) / iterations
 
-        except Exception:
+        except Exception as e:
+            # 之前是 silent：单次回退到 _estimate_preflop_equity，bug 无法定位
+            from src.utils.diagnostics import log_exception_with_traceback
+            log_exception_with_traceback(
+                equity_logger, e,
+                "[equity] calculate_equity 异常，回退到 _estimate_preflop_equity",
+                hole_cards=hole_cards, community_cards=community_cards,
+                num_opponents=num_opponents, iterations=iterations,
+            )
             return self._estimate_preflop_equity(hole_cards)
 
     # 完整 52 张牌（字符串格式），用于范围对抗采样
@@ -157,7 +168,15 @@ class EquityCalculator:
 
             return (wins + (ties / 2)) / valid
 
-        except Exception:
+        except Exception as e:
+            from src.utils.diagnostics import log_exception_with_traceback
+            log_exception_with_traceback(
+                equity_logger, e,
+                "[equity] calculate_equity_vs_range 异常，回退到 calculate_equity",
+                hole_cards=hole_cards, community_cards=community_cards,
+                num_opponents=num_opponents, iterations=iterations,
+                opp_range_size=len(opp_range) if opp_range else 0,
+            )
             return self.calculate_equity(hole_cards, community_cards, num_opponents, iterations)
     
     def calculate_ev(self, equity: float, pot: int, to_call: int,
@@ -329,7 +348,13 @@ class EquityCalculator:
                 "points": 8000 - score, # score 越小牌越强，转换成点数
                 "draws": draws
             }
-        except Exception:
+        except Exception as e:
+            from src.utils.diagnostics import log_exception_with_traceback
+            log_exception_with_traceback(
+                equity_logger, e,
+                "[equity] get_hand_strength 异常，回退到 draws-only",
+                hole_cards=hole_cards, community_cards=community_cards,
+            )
             return {"combination": "none", "points": 0, "draws": self.detect_draws(hole_cards, community_cards)}
 
     def detect_draws(self, hole_cards: list[str], community_cards: list[str]) -> dict:

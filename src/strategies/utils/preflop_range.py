@@ -30,8 +30,15 @@ class PreflopRangeManager:
                 with open(config_path, "r", encoding="utf-8") as f:
                     data = yaml.safe_load(f)
                     return data.get("ranges", {})
-            except Exception:
-                pass
+            except Exception as e:
+                # 之前是 silent pass：YAML 损坏/编码错误都无法定位
+                import logging
+                from src.utils.diagnostics import log_exception_with_traceback
+                log_exception_with_traceback(
+                    logging.getLogger("preflop_range"), e,
+                    f"[preflop_range] 加载 {config_path} 失败，回退到默认范围",
+                    config_path=config_path,
+                )
         return {}
 
     def _get_fallback_ranges(self) -> Dict[str, List[str]]:

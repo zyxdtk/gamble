@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -173,7 +174,13 @@ class HandHistoryStore:
 
             return (jsonl_path, line_no)
         except Exception as e:
-            bot_logger.debug(f"HandHistoryStore.save 异常: {e}")
+            from src.utils.diagnostics import log_exception_with_traceback
+            log_exception_with_traceback(
+                bot_logger, e,
+                f"[hand_recorder] HandHistoryStore.save 异常 hand_id={record.hand_id}",
+                level=logging.DEBUG,
+                hand_id=record.hand_id, table_id=self._table_id,
+            )
             return None
 
     def _save_to_sqlite(self, record: HandRecord, jsonl_file: str, jsonl_line: int):
@@ -284,7 +291,13 @@ class HandRecorder:
             try:
                 self.finalize_hand(ws_state)
             except Exception as e:
-                bot_logger.debug(f"HandRecorder start_hand 时 finalize 上一手异常: {e}")
+                from src.utils.diagnostics import log_exception_with_traceback
+                log_exception_with_traceback(
+                    bot_logger, e,
+                    f"[hand_recorder] start_hand 时 finalize 上一手异常 hand_id={hand_id}",
+                    level=logging.DEBUG,
+                    hand_id=hand_id,
+                )
 
         now = datetime.now().isoformat(timespec="seconds")
         record = HandRecord(
@@ -346,7 +359,14 @@ class HandRecorder:
             elif action == "blinds":
                 self._on_blinds(update, ws_state)
         except Exception as e:
-            bot_logger.debug(f"HandRecorder.on_ws_update 异常 (action={action}): {e}")
+            from src.utils.diagnostics import log_exception_with_traceback
+            log_exception_with_traceback(
+                bot_logger, e,
+                f"[hand_recorder] on_ws_update 异常 (action={action})",
+                level=logging.DEBUG,
+                action=action,
+                hand_id=getattr(self._current, "hand_id", None),
+            )
 
     def _on_deal_hole_cards(self, update: Dict[str, Any], ws_state: Dict[str, Any]):
         """记录我的底牌"""
@@ -520,6 +540,11 @@ class HandRecorder:
 
         街道推断：auto_player 传进来的 street 经常错（一直被标成 preflop），
         这里以累积公牌数为准做兜底修正。
+
+        amount 修复：choice.amount 是策略"想"下注的金额（常为 0，因 strategy 调
+        get_action_for_bet 后由 adapter 算 to_call），但实际浏览器执行的是
+        一个不同的金额（call 需付 to_call, raise 需 raise-to）。这里在记录时
+        优先用 choice.amount；若为 0（call/raise/check），尝试用 to_call 兜底。
         """
         if self._current is None:
             return
@@ -528,10 +553,18 @@ class HandRecorder:
         if inferred_street and (not street or street == "preflop"):
             street = inferred_street
         now = datetime.now().isoformat(timespec="seconds")
+        # 金额修正：策略常传 0，记录时如果能拿到 to_call 优先用 to_call
+        action = getattr(choice, "action", "")
+        raw_amount = int(getattr(choice, "amount", 0) or 0)
+        if raw_amount <= 0 and action in ("call", "raise", "bet"):
+            # 尝试从 choice 的 raw 字段或 self._current.to_call 兜底
+            to_call_fallback = getattr(self._current, "to_call", 0) or 0
+            if to_call_fallback > 0:
+                raw_amount = to_call_fallback
         self._current.my_decisions.append(DecisionContext(
             street=street or "",
-            action=getattr(choice, "action", ""),
-            amount=int(getattr(choice, "amount", 0) or 0),
+            action=action,
+            amount=raw_amount,
             equity=float(getattr(choice, "equity", 0.0) or 0.0),
             pot_odds=float(getattr(choice, "pot_odds", 0.0) or 0.0),
             ev=float(getattr(choice, "ev", 0.0) or 0.0),
@@ -590,7 +623,14 @@ class HandRecorder:
                 f"profit={self._current.my_profit:+d} 已保存"
             )
         except Exception as e:
-            bot_logger.debug(f"HandRecorder.finalize_hand 异常: {e}")
+            from src.utils.diagnostics import log_exception_with_traceback
+            hand_id_dbg = getattr(self._current, "hand_id", "?") if self._current else "?"
+            log_exception_with_traceback(
+                bot_logger, e,
+                f"[hand_recorder] finalize_hand 异常 hand_id={hand_id_dbg}",
+                level=logging.DEBUG,
+                hand_id=hand_id_dbg,
+            )
         finally:
             self._current = None
             self._chips_start = 0

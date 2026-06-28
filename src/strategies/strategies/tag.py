@@ -11,6 +11,10 @@ from src.strategies.utils import (
 from src.strategies.utils.game_utils import get_randomized_amount
 from src.strategies.utils.tactical_calc import TacticalCalculator
 from src.strategies.player_analysis import get_player_tag
+from src.utils.diagnostics import log_exception_with_traceback, safe_call
+
+import logging
+tag_logger = logging.getLogger("tag_strategy")
 
 
 class TightAggressiveStrategy(Strategy):
@@ -248,19 +252,60 @@ class TightAggressiveStrategy(Strategy):
             if combos <= 0:
                 return 1.0
             return max(0.3, min(3.0, 169.0 / combos))
-        except Exception:
+        except Exception as e:
+            # 静默回退到 1.0 之前是 bug：get_active_combos_count 抛错时无法定位
+            log_exception_with_traceback(
+                tag_logger, e,
+                "[tag] _evaluate_perceived_tightness 异常，回退到中性 1.0",
+                op="hero_perceived_range.get_active_combos_count",
+            )
             return 1.0
 
     def _create_postflop_tag_plan(
         self, state: GameState, hand_str: str
     ) -> ActionPlan:
+        # ─── 顶层保护 ───
+        # _create_postflop_tag_plan 内部调用了 equity/fold_equity/get_hand_strength
+        # 等多个易错方法，任一抛异常都会被 cli_player 静默吞掉
+        # 这里用 safe_call 包装，把所有 traceback 暴露到日志
+        try:
+            return self._create_postflop_tag_plan_impl(state, hand_str)
+        except Exception as e:
+            log_exception_with_traceback(
+                tag_logger, e,
+                f"[tag] _create_postflop_tag_plan 未捕获异常，回退到 fold (hand={hand_str})",
+                hand=hand_str,
+                street=TacticalCalculator.calc_street(state),
+                pot=getattr(state, "pot", "?"),
+                to_call=getattr(state, "to_call", "?"),
+                my_seat_id=getattr(state, "my_seat_id", "?"),
+            )
+            # 兜底：返回 fold（让 cli_player 走 heuristic_default 一致路径）
+            return ActionPlan(
+                ActionType.FOLD,
+                fallback_action=ActionType.FOLD,
+                reasoning=f"TAG 异常兜底弃牌 ({hand_str})",
+            )
+
+    def _create_postflop_tag_plan_impl(
+        self, state: GameState, hand_str: str
+    ) -> ActionPlan:
+        """_create_postflop_tag_plan 的实际实现，由外层 try/except 保护"""
         num_opponents = TacticalCalculator.calc_num_opponents(state)
         if num_opponents < 1:
             num_opponents = 1
 
         # 范围对抗 equity：优先用对手推断范围采样，而非随机
         # 模拟人类"对手加注→范围收紧→我的 JJ 胜率下降"的思考过程
-        opp_range_model = self._get_opponent_range_model(state)
+        # ─── _get_opponent_range_model 可能抛异常 ───
+        opp_range_model = safe_call(
+            self._get_opponent_range_model, state,
+            default=None,
+            logger=tag_logger,
+            op_name="_get_opponent_range_model",
+            hand=hand_str,
+            num_opponents=num_opponents,
+        )
         if opp_range_model is not None:
             equity = self.equity_calc.calculate_equity_vs_range(
                 state.hole_cards, state.community_cards,
@@ -306,9 +351,29 @@ class TightAggressiveStrategy(Strategy):
         board_wetness = board_texture.get("wetness", 0.5) if board_texture else 0.5
 
         # EV 计算（与 Balanced/Aggressive 保持一致，供日志/HUD 使用）
+        # ─── sum(p.vpip for p in active_opps) 裸露求和可能抛异常 ───
         active_opps = [p for p in opponents if p.seat_id != state.my_seat_id]
-        avg_vpip = sum(p.vpip for p in active_opps) / len(active_opps) if active_opps else 0.3
-        fold_equity = self.equity_calc.estimate_fold_equity(avg_vpip, 0.0, street)
+        if active_opps:
+            try:
+                avg_vpip = sum(p.vpip for p in active_opps) / len(active_opps)
+            except Exception as e:
+                log_exception_with_traceback(
+                    tag_logger, e,
+                    "[tag] active_opps vpip 求和异常，回退到 0.3",
+                    hand=hand_str,
+                    street=street,
+                )
+                avg_vpip = 0.3
+        else:
+            avg_vpip = 0.3
+        # ─── estimate_fold_equity 裸露调用可能抛异常 ───
+        fold_equity = safe_call(
+            self.equity_calc.estimate_fold_equity, avg_vpip, 0.0, street,
+            default=0.0,
+            logger=tag_logger,
+            op_name="estimate_fold_equity",
+            hand=hand_str, avg_vpip=avg_vpip, street=street,
+        )
         planned_raise = int(pot * 0.6) if pot > 0 else state.min_raise
         ev_result = self.equity_calc.calculate_ev(
             equity=equity, pot=pot, to_call=call_amount,

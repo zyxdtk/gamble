@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import os
+import logging
 from src.strategies.strategy_base import Strategy
 from src.strategies.action_plan import ActionPlan, ActionType
 from src.strategies.game_state import GameState
@@ -83,7 +84,13 @@ class NeuralStrategy(Strategy):
             self.model_loaded = True
             brain_logger.info(f"深度模型加载成功 (v{self.model_version}, {self.model.state_shape}): {path}")
         except Exception as e:
-            brain_logger.error(f"模型加载失败 (架构不匹配或路径错误): {e}")
+            from src.utils.diagnostics import log_exception_with_traceback
+            log_exception_with_traceback(
+                brain_logger, e,
+                f"模型加载失败 (架构不匹配或路径错误) v{self.model_version} path={path}",
+                level=logging.ERROR,
+                path=path, model_version=self.model_version,
+            )
 
     def make_decision(self, state: GameState) -> ActionPlan:
         """实施基于神经网络的推理决策"""

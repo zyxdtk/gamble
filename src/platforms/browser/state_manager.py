@@ -4,6 +4,7 @@
 这是 src/platforms/browser 的核心组件，供所有上层调用（包括 CLI 测试和未来的 src/core）
 """
 import asyncio
+import logging
 import time
 from typing import Dict, Any, Optional
 from playwright.async_api import Page
@@ -223,7 +224,12 @@ class StateManager:
                         state["rake_from_dom"] = int(m.group(1).replace(",", ""))
 
         except Exception as e:
-            bot_logger.debug(f"DOM extraction error: {e}")
+            from src.utils.diagnostics import log_exception_with_traceback
+            log_exception_with_traceback(
+                bot_logger, e,
+                "[state_manager] DOM extraction 异常",
+                level=logging.DEBUG,
+            )
             # DOM 提取异常时保存快照（带防抖）
             self._save_snapshot_debounced("dom_extraction_error", {"error": str(e)})
 
@@ -402,38 +408,57 @@ class StateManager:
         # 只在差异值变化时输出
         if diffs != self._prev_diffs:
             self._prev_diffs = diffs
+            # 公共上下文：街道、手牌、可用动作（所有 MISMATCH 共用）
+            _ctx = (
+                f"street={merged.get('current_stage', '?')}, "
+                f"hole={merged.get('hole_cards', '?')}, "
+                f"avail={merged.get('available_actions', '?')}"
+            )
             if "seat" in diffs:
                 # DOM 的 Position--N 可能是视觉位置而非逻辑座位号，与 WS seatId 不一致属正常。
                 # WS 通过 dealHoleCards 识别座位，可靠度 high，以此为准。
                 state_logger.debug(
-                    f"[SEAT-DIFF] WS seat={diffs['seat'][0]}, DOM Position={diffs['seat'][1]} — using WS"
+                    f"[SEAT-DIFF] WS seat={diffs['seat'][0]}, DOM Position={diffs['seat'][1]} — using WS | {_ctx}"
                 )
             if "turn" in diffs:
                 state_logger.debug(
-                    f"[TURN-MISMATCH] WS is_my_turn={diffs['turn'][0]}, DOM={diffs['turn'][1]}"
+                    f"[TURN-MISMATCH] WS is_my_turn={diffs['turn'][0]}, DOM={diffs['turn'][1]} | {_ctx}"
                 )
             if "cards" in diffs:
                 state_logger.debug(
-                    f"[CARDS-MISMATCH] WS cards={list(diffs['cards'][0])}, DOM={list(diffs['cards'][1])}"
+                    f"[CARDS-MISMATCH] WS cards={list(diffs['cards'][0])}, DOM={list(diffs['cards'][1])} | {_ctx}"
                 )
             if "to_call" in diffs:
                 state_logger.debug(
-                    f"[TOCALL-MISMATCH] WS to_call={diffs['to_call'][0]}, DOM={diffs['to_call'][1]}"
+                    f"[TOCALL-MISMATCH] WS to_call={diffs['to_call'][0]}, DOM={diffs['to_call'][1]} | {_ctx}"
                 )
             if "min_raise" in diffs:
                 state_logger.debug(
-                    f"[MINRAISE-MISMATCH] WS min_raise={diffs['min_raise'][0]}, DOM={diffs['min_raise'][1]}"
+                    f"[MINRAISE-MISMATCH] WS min_raise={diffs['min_raise'][0]}, DOM={diffs['min_raise'][1]} | {_ctx}"
                 )
             if "pot" in diffs:
                 diff_val = abs(diffs["pot"][0] - diffs["pot"][1])
-                if diffs["pot"][1] > diffs["pot"][0]:
-                    state_logger.warning(
-                        f"[POT-MISMATCH] ws={diffs['pot'][0]}, dom={diffs['pot'][1]}, diff={diff_val} — using DOM"
+                # 阈值：差异 <= 1bb 时降级为 debug（避免告警噪音，常见原因是 WS 延迟更新）
+                # 差异 > 1bb 才用 warning（可能是 DOM 解析错位或 WS 数据异常）
+                bb = merged.get("big_blind") or 2
+                threshold = max(1, int(bb))
+                if diff_val <= threshold:
+                    state_logger.debug(
+                        f"[POT-MISMATCH-DEBUG] ws={diffs['pot'][0]}, dom={diffs['pot'][1]}, "
+                        f"diff={diff_val} (≤{threshold}bb) — 已选择较大值 | {_ctx}"
                     )
                 else:
-                    state_logger.warning(
-                        f"[POT-MISMATCH] ws={diffs['pot'][0]}, dom={diffs['pot'][1]}, diff={diff_val} — using WS"
-                    )
+                    # 重要差异：用 warning，但说明 merge 已选较大值
+                    if diffs["pot"][1] > diffs["pot"][0]:
+                        state_logger.warning(
+                            f"[POT-MISMATCH] ws={diffs['pot'][0]}, dom={diffs['pot'][1]}, "
+                            f"diff={diff_val} — using DOM (pot只增不降) | {_ctx}"
+                        )
+                    else:
+                        state_logger.warning(
+                            f"[POT-MISMATCH] ws={diffs['pot'][0]}, dom={diffs['pot'][1]}, "
+                            f"diff={diff_val} — using WS | {_ctx}"
+                        )
 
     def _log_merged_summary(self, merged: Dict):
         """合并结果变化时输出摘要（只在关键字段变化时输出，避免刷屏）"""

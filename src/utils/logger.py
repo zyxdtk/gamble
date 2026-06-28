@@ -12,6 +12,13 @@ LOG_DIR.mkdir(exist_ok=True)
 APP_LOG = "app.log"
 WARN_LOG = "warn.log"
 
+# 专用日志文件（按通道分流：原始数据源 vs 解析结果）
+# - WS 通道：所有收到的 WebSocket 帧 + 解析后的 envelope/update
+# - DOM 通道：从 DOM 解析出来的业务字段（actions / pot / community cards / seats 等）
+#   注意：不是完整 DOM 树，是提取后的结构化信息
+WS_RAW_LOG = "ws_raw.log"
+DOM_LOG = "dom.log"
+
 # 日志轮转配置
 MAX_BYTES = 10 * 1024 * 1024  # 10MB
 BACKUP_COUNT = 10              # 最多保留 10 个备份
@@ -26,6 +33,12 @@ FILE_FORMAT = logging.Formatter(
     "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+# 专用 logger 名称 → 日志文件 映射
+DEDICATED_LOGGERS: dict[str, str] = {
+    "ws_raw": WS_RAW_LOG,
+    "dom": DOM_LOG,
+}
 
 
 def _setup_root_logger():
@@ -98,16 +111,51 @@ def get_logger(name: str, minimal: bool = False) -> logging.Logger:
     所有 logger 共享根 logger 的 handler（app.log + warn.log + 控制台）。
     不再为每个模块创建独立日志文件。
 
+    特殊：DEDICATED_LOGGERS 中的 logger 会被额外挂一个专用文件 handler，
+    例如 `ws_raw` → logs/ws_raw.log，`dom` → logs/dom.log。
+    仍然 propagate 到根 logger，所以会同时写入 app.log（不影响现有行为）。
+
     Args:
         name: logger 名称（通常为模块名）
         minimal: 兼容参数，不再使用
     """
     _setup_root_logger()
+    _attach_dedicated_handler(name)
 
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)  # 让所有消息通过，由 handler 过滤
 
     return logger
+
+
+def _attach_dedicated_handler(logger_name: str) -> None:
+    """为专用 logger 添加专属文件 handler
+
+    - 仅当 logger_name 在 DEDICATED_LOGGERS 中才生效
+    - 同一 logger 不会重复添加（用 _dedicated_for 标记）
+    - 保留 propagate=True，让消息同时进 app.log（向后兼容）
+    """
+    if logger_name not in DEDICATED_LOGGERS:
+        return
+
+    target = logging.getLogger(logger_name)
+    log_file = DEDICATED_LOGGERS[logger_name]
+
+    # 避免重复添加
+    for h in target.handlers:
+        if getattr(h, "_dedicated_for", None) == log_file:
+            return
+
+    handler = logging.handlers.RotatingFileHandler(
+        LOG_DIR / log_file,
+        maxBytes=MAX_BYTES,
+        backupCount=BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(FILE_FORMAT)
+    handler._dedicated_for = log_file
+    target.addHandler(handler)
 
 
 # ─── 兼容旧接口 ─────────────────────────────────────────────────────────────

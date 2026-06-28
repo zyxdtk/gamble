@@ -106,9 +106,14 @@ class WebSocketListener:
 
             await self._process_game_message(data[4])
         except Exception as e:
-            bot_logger.debug(f"WS frame processing error: {e}")
-            ws_raw_logger.error(f"[PARSE ERROR] {e}")
-    
+            from src.utils.diagnostics import log_exception_with_traceback
+            log_exception_with_traceback(
+                bot_logger, e,
+                "[websocket_listener] WS frame processing 异常",
+                level=logging.DEBUG,
+            )
+            ws_raw_logger.error(f"[PARSE ERROR] {type(e).__name__}: {e}")
+
     async def _process_game_message(self, data: Dict):
         """处理游戏状态消息"""
         if not isinstance(data, dict):
@@ -358,7 +363,13 @@ class WebSocketListener:
                 try:
                     cb(action, update, self.state.copy())
                 except Exception as e:
-                    bot_logger.debug(f"WS update callback error: {e}")
+                    from src.utils.diagnostics import log_exception_with_traceback
+                    log_exception_with_traceback(
+                        bot_logger, e,
+                        f"[websocket_listener] WS update callback 异常 action={action}",
+                        level=logging.DEBUG,
+                        action=action,
+                    )
 
     async def _handle_deal_hole_cards(self, update: Dict):
         """处理发底牌消息，自动识别自己的座位"""

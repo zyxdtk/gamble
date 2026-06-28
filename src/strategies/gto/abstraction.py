@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Dict, List, Optional, Tuple
@@ -222,7 +223,21 @@ class CardAbstraction:
                     wins += 1
                 elif hero_score == best_villain:
                     ties += 1
-            except Exception:
+            except Exception as e:
+                # 之前 silent continue：但 MCP 模式下这种 silent 会让 equity 静默偏低
+                # 这里降级为 debug（每 100 次打一次），避免日志爆炸
+                from src.utils.diagnostics import log_exception_with_traceback
+                _ = log_exception_with_traceback  # 显式 import 防 lint 警告
+                abs_logger = logging.getLogger("gto_abstraction")
+                if not getattr(self, "_eq_debug_throttled", False):
+                    self._eq_debug_throttled = True
+                    log_exception_with_traceback(
+                        abs_logger, e,
+                        "[abstraction] 单次 equity 评估异常，continue "
+                        "(后续只打 debug，不重复 traceback)",
+                        level=logging.DEBUG,
+                        hero=hole_cards, board=sim_board,
+                    )
                 continue
 
         return (wins + ties / 2) / iterations if iterations > 0 else 0.0

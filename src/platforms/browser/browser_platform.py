@@ -211,11 +211,17 @@ class BrowserPlatform(GamePlatform):
         self.playwright = await async_playwright().start()
         
         # 创建持久化上下文（保持登录状态）
+        # viewport 1280x800：比默认 720 多 80px，刚好容纳顶部 "Chrome is being controlled" 横幅(~40px) + 余量，
+        # 避免加太多(900)破坏 ReplayPoker 布局
         self.context = await self.playwright.chromium.launch_persistent_context(
             self.config.user_data_dir,
             headless=self.headless,
             channel="chrome",
-            args=["--disable-blink-features=AutomationControlled"]
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",  # 旧版 Chrome 可隐藏横幅；新版无效但无害
+            ],
+            viewport={"width": 1280, "height": 800},
         )
         
         # 获取或创建大厅页面
@@ -716,7 +722,9 @@ class BrowserPlatform(GamePlatform):
             bot_logger.info(f"[动作完成] {action_name}{f' {amount}' if amount else ''}")
         else:
             bot_logger.warning(
-                f"[动作失败] {action_name}{f' {amount}' if amount else ''}"
+                f"[动作失败] {action_name}{f' {amount}' if amount else ''}\n"
+                f"  preset={preset}, source={getattr(action, 'source', '?')}\n"
+                f"  reasoning={getattr(action, 'reasoning', '?')}"
             )
             # 执行失败时保存快照（带防抖，同一动作 60 秒内不重复）
             snap_key = f"action_failed:{action_name}"

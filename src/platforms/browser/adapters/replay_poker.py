@@ -789,6 +789,9 @@ class ReplayPokerAdapter(WebsiteAdapter):
             "presets": {}  # 预设按钮：min, half, pot, max
         }
         try:
+            # 限定到下注面板，避免误匹配页面别处（聊天/历史/弹窗）的同名按钮
+            # ReplayPoker 把所有可执行动作按钮都放在 .BettingControls__actions 容器里
+            panel = page.locator(".BettingControls__actions")
             targets = {
                 "fold": r"\bFold\b",
                 "check": r"\bCheck\b",
@@ -797,9 +800,9 @@ class ReplayPokerAdapter(WebsiteAdapter):
                 "bet": r"\bBet\b",
                 "all_in": r"\bAll\s*In\b",
             }
-            
+
             for action_name, button_regex in targets.items():
-                btn = page.get_by_role("button", name=re.compile(button_regex, re.IGNORECASE))
+                btn = panel.get_by_role("button", name=re.compile(button_regex, re.IGNORECASE))
                 try:
                     if await btn.count() == 0:
                         continue
@@ -807,24 +810,10 @@ class ReplayPokerAdapter(WebsiteAdapter):
 
                     # 1. 检查是否 visible
                     if not await first_btn.is_visible():
+                        bot_logger.debug(f"[DOM-FILTER] '{action_name}' 不可见 (is_visible=false)")
                         continue
 
-                    # 2. 检查是否在 viewport 内（排除屏幕外的元素）
-                    is_in_viewport = await first_btn.evaluate("""
-                        (el) => {
-                            const rect = el.getBoundingClientRect();
-                            return (
-                                rect.top >= 0 &&
-                                rect.left >= 0 &&
-                                rect.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
-                                rect.right <= (window.innerWidth || document.documentElement.clientWidth)
-                            );
-                        }
-                    """)
-                    if not is_in_viewport:
-                        continue
-
-                    # 3. 检查父元素是否隐藏（例如 .AwaitTurn 容器）
+                    # 2. 检查父元素是否隐藏（例如 .AwaitTurn 容器）
                     parent_class = await first_btn.evaluate("""
                         (el) => {
                             let parent = el.parentElement;
@@ -839,30 +828,33 @@ class ReplayPokerAdapter(WebsiteAdapter):
                         }
                     """)
                     if parent_class:
-                        bot_logger.debug(f"Button '{action_name}' hidden by parent: {parent_class}")
+                        bot_logger.debug(f"[DOM-FILTER] '{action_name}' 被父元素隐藏: {parent_class}")
                         continue
 
-                    # 4. 检查按钮是否被禁用（灰色状态）
+                    # 3. 检查按钮是否被禁用（灰色状态）
                     disabled = await first_btn.get_attribute("disabled")
                     if disabled is not None:
+                        bot_logger.debug(f"[DOM-FILTER] '{action_name}' 被禁用 (disabled={disabled})")
                         continue
 
-                    # 5. 检查样式中的 opacity，如果太低说明是禁用状态
+                    # 4. 检查样式中的 opacity，如果太低说明是禁用状态
                     style = await first_btn.get_attribute("style") or ""
                     opacity_match = re.search(r'opacity:\s*([\d.]+)', style)
                     if opacity_match:
                         opacity = float(opacity_match.group(1))
                         if opacity < 0.5:
+                            bot_logger.debug(f"[DOM-FILTER] '{action_name}' opacity 过低 ({opacity})")
                             continue
 
                     actions["available"].append(action_name)
-                except Exception:
+                except Exception as e:
                     # 按钮查找/评估超时，跳过此按钮
+                    bot_logger.debug(f"[DOM-FILTER] '{action_name}' 异常: {type(e).__name__}: {e}")
                     continue
-            
+
             if "call" in actions["available"]:
                 try:
-                    call_btn = page.get_by_role("button", name=re.compile(r"\bCall\b", re.IGNORECASE)).first
+                    call_btn = panel.get_by_role("button", name=re.compile(r"\bCall\b", re.IGNORECASE)).first
                     label = await call_btn.text_content(timeout=2000)
                     if label:
                         m = re.search(r'\bCall\s+([\d,]+)', label, re.IGNORECASE)
@@ -876,9 +868,9 @@ class ReplayPokerAdapter(WebsiteAdapter):
             raise_btn = None
             try:
                 if "raise" in actions["available"]:
-                    raise_btn = page.get_by_role("button", name=re.compile(r"\bRaise\b", re.IGNORECASE)).first
+                    raise_btn = panel.get_by_role("button", name=re.compile(r"\bRaise\b", re.IGNORECASE)).first
                 elif "bet" in actions["available"]:
-                    raise_btn = page.get_by_role("button", name=re.compile(r"\bBet\b", re.IGNORECASE)).first
+                    raise_btn = panel.get_by_role("button", name=re.compile(r"\bBet\b", re.IGNORECASE)).first
 
                 if raise_btn:
                     label = await raise_btn.text_content(timeout=2000)
